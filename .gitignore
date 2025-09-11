@@ -1,0 +1,33 @@
+# --- Virtual envs & secrets ---
+.venv/
+venv/
+env/
+.env
+.env.*
+
+# --- Python caches/build ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+.build/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# --- Notebooks ---
+**/.ipynb_checkpoints/
+
+# --- Data (keep metadata small files tracked) ---
+data/raw_data/
+data/processed_data/
+data/external/
+outputs/
+models/
+logs/
+# keep metadata / samples / docs
+!data/metadata/
+!data/metadata/**
+!data/README.md
+!outputs/README.md

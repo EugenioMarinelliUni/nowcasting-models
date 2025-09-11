@@ -1,0 +1,102 @@
+RPI: Frequency = Monthly, Seasonality = Billions of Chained 2017 Dollars, Seasonally Adjusted Annual Rate
+W875RX1: Frequency = Monthly, Seasonality = Billions of Chained 2017 Dollars, Seasonally Adjusted Annual Rate
+DPCERA3M086SBEA: Frequency = Monthly, Seasonality = Index 2017=100, Seasonally Adjusted
+INDPRO: Frequency = Monthly, Seasonality = Index 2017=100, Seasonally Adjusted
+IPFPNSS: Frequency = Monthly, Seasonality = Index 2017=100, Seasonally Adjusted
+IPFINAL: Frequency = Monthly, Seasonality = Index 2017=100, Seasonally Adjusted
+IPCONGD: Frequency = Monthly, Seasonality = Index 2017=100, Seasonally Adjusted
+IPDCONGD: Frequency = Monthly, Seasonality = Index 2017=100, Seasonally Adjusted
+IPNCONGD: Frequency = Monthly, Seasonality = Index 2017=100, Seasonally Adjusted
+IPBUSEQ: Frequency = Monthly, Seasonality = Index 2017=100, Seasonally Adjusted
+IPMAT: Frequency = Monthly, Seasonality = Index 2017=100, Seasonally Adjusted
+IPDMAT: Frequency = Monthly, Seasonality = Index 2017=100, Seasonally Adjusted
+IPNMAT: Frequency = Monthly, Seasonality = Index 2017=100, Seasonally Adjusted
+IPMANSICS: Frequency = Monthly, Seasonality = Index 2017=100, Seasonally Adjusted
+IPB51222S: Frequency = Monthly, Seasonality = Index 2017=100, Seasonally Adjusted
+IPFUELS: Frequency = Monthly, Seasonality = Index 2017=100, Seasonally Adjusted
+CUMFNS: Frequency = Monthly, Seasonality = Percent, Seasonally Adjusted
+CLF16OV: Frequency = Monthly, Seasonality = Thousands of Persons, Seasonally Adjusted
+CE16OV: Frequency = Monthly, Seasonality = Thousands of Persons, Seasonally Adjusted
+UNRATE: Frequency = Monthly, Seasonality = Percent, Seasonally Adjusted
+UEMPMEAN: Frequency = Monthly, Seasonality = Weeks, Seasonally Adjusted
+UEMPLT5: Frequency = Monthly, Seasonality = Thousands of Persons, Seasonally Adjusted
+UEMP5TO14: Frequency = Monthly, Seasonality = Thousands of Persons, Seasonally Adjusted
+UEMP15OV: Frequency = Monthly, Seasonality = Thousands of Persons, Seasonally Adjusted
+UEMP15T26: Frequency = Monthly, Seasonality = Thousands of Persons, Seasonally Adjusted
+UEMP27OV: Frequency = Monthly, Seasonality = Thousands of Persons, Seasonally Adjusted
+PAYEMS: Frequency = Monthly, Seasonality = Thousands of Persons, Seasonally Adjusted
+USGOOD: Frequency = Monthly, Seasonality = Thousands of Persons, Seasonally Adjusted
+CES1021000001: Frequency = Monthly, Seasonality = Thousands of Persons, Seasonally Adjusted
+USCONS: Frequency = Monthly, Seasonality = Thousands of Persons, Seasonally Adjusted
+MANEMP: Frequency = Monthly, Seasonality = Thousands of Persons, Seasonally Adjusted
+DMANEMP: Frequency = Monthly, Seasonality = Thousands of Persons, Seasonally Adjusted
+NDMANEMP: Frequency = Monthly, Seasonality = Thousands of Persons, Seasonally Adjusted
+SRVPRD: Frequency = Monthly, Seasonality = Thousands of Persons, Seasonally Adjusted
+USTPU: Frequency = Monthly, Seasonality = Thousands of Persons, Seasonally Adjusted
+USWTRADE: Frequency = Monthly, Seasonality = Thousands of Persons, Seasonally Adjusted
+USTRADE: Frequency = Monthly, Seasonality = Thousands of Persons, Seasonally Adjusted
+USFIRE: Frequency = Monthly, Seasonality = Thousands of Persons, Seasonally Adjusted
+USGOVT: Frequency = Monthly, Seasonality = Thousands of Persons, Seasonally Adjusted
+CES0600000007: Frequency = Monthly, Seasonality = Hours, Seasonally Adjusted
+AWOTMAN: Frequency = Monthly, Seasonality = Hours, Seasonally Adjusted
+AWHMAN: Frequency = Monthly, Seasonality = Hours, Seasonally Adjusted
+HOUST: Frequency = Monthly, Seasonality = Thousands of Units, Seasonally Adjusted Annual Rate
+HOUSTNE: Frequency = Monthly, Seasonality = Thousands of Units, Seasonally Adjusted Annual Rate
+HOUSTMW: Frequency = Monthly, Seasonality = Thousands of Units, Seasonally Adjusted Annual Rate
+HOUSTS: Frequency = Monthly, Seasonality = Thousands of Units, Seasonally Adjusted Annual Rate
+HOUSTW: Frequency = Monthly, Seasonality = Thousands of Units, Seasonally Adjusted Annual Rate
+PERMIT: Frequency = Monthly, Seasonality = Thousands of Units, Seasonally Adjusted Annual Rate
+PERMITNE: Frequency = Monthly, Seasonality = Thousands of Units, Seasonally Adjusted Annual Rate
+PERMITMW: Frequency = Monthly, Seasonality = Thousands of Units, Seasonally Adjusted Annual Rate
+PERMITS: Frequency = Monthly, Seasonality = Thousands of Units, Seasonally Adjusted Annual Rate
+PERMITW: Frequency = Monthly, Seasonality = Thousands of Units, Seasonally Adjusted Annual Rate
+ACOGNO: Frequency = Monthly, Seasonality = Millions of Dollars, Seasonally Adjusted
+M1SL: Frequency = Monthly, Seasonality = Billions of Dollars, Seasonally Adjusted
+M2SL: Frequency = Monthly, Seasonality = Billions of Dollars, Seasonally Adjusted
+M2REAL: Frequency = Monthly, Seasonality = Billions of 1982-84 Dollars, Seasonally Adjusted
+BOGMBASE: Frequency = Monthly, Seasonality = Billions of Dollars, Not Seasonally Adjusted
+TOTRESNS: Frequency = Monthly, Seasonality = Billions of Dollars, Not Seasonally Adjusted
+NONBORRES: Frequency = Monthly, Seasonality = Billions of Dollars, Not Seasonally Adjusted
+BUSLOANS: Frequency = Monthly, Seasonality = Billions of U.S. Dollars, Seasonally Adjusted
+REALLN: Frequency = Monthly, Seasonality = Billions of U.S. Dollars, Seasonally Adjusted
+NONREVSL: Frequency = Monthly, Seasonality = Millions of Dollars, Seasonally Adjusted
+FEDFUNDS: Frequency = Monthly, Seasonality = Percent, Not Seasonally Adjusted
+TB3MS: Frequency = Monthly, Seasonality = Percent, Not Seasonally Adjusted
+TB6MS: Frequency = Monthly, Seasonality = Percent, Not Seasonally Adjusted
+GS1: Frequency = Monthly, Seasonality = Percent, Not Seasonally Adjusted
+GS5: Frequency = Monthly, Seasonality = Percent, Not Seasonally Adjusted
+GS10: Frequency = Monthly, Seasonality = Percent, Not Seasonally Adjusted
+AAA: Frequency = Monthly, Seasonality = Percent, Not Seasonally Adjusted
+BAA: Frequency = Monthly, Seasonality = Percent, Not Seasonally Adjusted
+TB3SMFFM: Frequency = Monthly, Seasonality = Percent, Not Seasonally Adjusted
+TB6SMFFM: Frequency = Monthly, Seasonality = Percent, Not Seasonally Adjusted
+T1YFFM: Frequency = Monthly, Seasonality = Percent, Not Seasonally Adjusted
+T5YFFM: Frequency = Monthly, Seasonality = Percent, Not Seasonally Adjusted
+T10YFFM: Frequency = Monthly, Seasonality = Percent, Not Seasonally Adjusted
+AAAFFM: Frequency = Monthly, Seasonality = Percent, Not Seasonally Adjusted
+BAAFFM: Frequency = Monthly, Seasonality = Percent, Not Seasonally Adjusted
+WPSFD49207: Frequency = Monthly, Seasonality = Index 1982=100, Seasonally Adjusted
+WPSFD49502: Frequency = Monthly, Seasonality = Index 1982=100, Seasonally Adjusted
+WPSID61: Frequency = Monthly, Seasonality = Index 1982=100, Seasonally Adjusted
+WPSID62: Frequency = Monthly, Seasonality = Index 1982=100, Seasonally Adjusted
+PPICMM: Frequency = Monthly, Seasonality = Index 1982=100, Not Seasonally Adjusted
+CPIAUCSL: Frequency = Monthly, Seasonality = Index 1982-1984=100, Seasonally Adjusted
+CPIAPPSL: Frequency = Monthly, Seasonality = Index 1982-1984=100, Seasonally Adjusted
+CPITRNSL: Frequency = Monthly, Seasonality = Index 1982-1984=100, Seasonally Adjusted
+CPIMEDSL: Frequency = Monthly, Seasonality = Index 1982-1984=100, Seasonally Adjusted
+CUSR0000SAC: Frequency = Monthly, Seasonality = Index 1982-1984=100, Seasonally Adjusted
+CUSR0000SAD: Frequency = Monthly, Seasonality = Index 1982-1984=100, Seasonally Adjusted
+CUSR0000SAS: Frequency = Monthly, Seasonality = Index 1982-1984=100, Seasonally Adjusted
+CPIULFSL: Frequency = Monthly, Seasonality = Index 1982-1984=100, Seasonally Adjusted
+CUSR0000SA0L2: Frequency = Monthly, Seasonality = Index 1982-1984=100, Seasonally Adjusted
+CUSR0000SA0L5: Frequency = Monthly, Seasonality = Index 1982-1984=100, Seasonally Adjusted
+PCEPI: Frequency = Monthly, Seasonality = Index 2017=100, Seasonally Adjusted
+DDURRG3M086SBEA: Frequency = Monthly, Seasonality = Index 2017=100, Seasonally Adjusted
+DNDGRG3M086SBEA: Frequency = Monthly, Seasonality = Index 2017=100, Seasonally Adjusted
+DSERRG3M086SBEA: Frequency = Monthly, Seasonality = Index 2017=100, Seasonally Adjusted
+CES0600000008: Frequency = Monthly, Seasonality = Dollars per Hour, Seasonally Adjusted
+CES2000000008: Frequency = Monthly, Seasonality = Dollars per Hour, Seasonally Adjusted
+CES3000000008: Frequency = Monthly, Seasonality = Dollars per Hour, Seasonally Adjusted
+DTCOLNVHFNM: Frequency = Monthly, Seasonality = Millions of Dollars, Not Seasonally Adjusted
+DTCTHFNM: Frequency = Monthly, Seasonality = Millions of Dollars, Not Seasonally Adjusted
+INVEST: Frequency = Monthly, Seasonality = Billions of U.S. Dollars, Seasonally Adjusted

@@ -1,0 +1,127 @@
+variable,group
+RPI,Output and Income
+W875RX1,Output and Income
+DPCERA3M086SBEA,Orders and Inventories
+CMRMTSPLx,Orders and Inventories
+RETAILx,Orders and Inventories
+INDPRO,Output and Income
+IPFPNSS,Output and Income
+IPFINAL,Output and Income
+IPCONGD,Output and Income
+IPDCONGD,Output and Income
+IPNCONGD,Output and Income
+IPBUSEQ,Output and Income
+IPMAT,Output and Income
+IPDMAT,Output and Income
+IPNMAT,Output and Income
+IPMANSICS,Output and Income
+IPB51222S,Output and Income
+IPFUELS,Output and Income
+CUMFNS,Output and Income
+HWI,Labor Market
+HWIURATIO,Labor Market
+CLF16OV,Labor Market
+CE16OV,Labor Market
+UNRATE,Labor Market
+UEMPMEAN,Labor Market
+UEMPLT5,Labor Market
+UEMP5TO14,Labor Market
+UEMP15OV,Labor Market
+UEMP15T26,Labor Market
+UEMP27OV,Labor Market
+CLAIMSx,Labor Market
+PAYEMS,Labor Market
+USGOOD,Labor Market
+CES1021000001,Labor Market
+USCONS,Labor Market
+MANEMP,Labor Market
+DMANEMP,Labor Market
+NDMANEMP,Labor Market
+SRVPRD,Labor Market
+USTPU,Labor Market
+USWTRADE,Labor Market
+USTRADE,Labor Market
+USFIRE,Labor Market
+USGOVT,Labor Market
+CES0600000007,Labor Market
+AWOTMAN,Labor Market
+AWHMAN,Labor Market
+HOUST,Consumption and Orders
+HOUSTNE,Consumption and Orders
+HOUSTMW,Consumption and Orders
+HOUSTS,Consumption and Orders
+HOUSTW,Consumption and Orders
+PERMIT,Consumption and Orders
+PERMITNE,Consumption and Orders
+PERMITMW,Consumption and Orders
+PERMITS,Consumption and Orders
+PERMITW,Consumption and Orders
+ACOGNO,Orders and Inventories
+AMDMNOx,Orders and Inventories
+ANDENOx,Orders and Inventories
+AMDMUOx,Orders and Inventories
+BUSINVx,Orders and Inventories
+ISRATIOx,Orders and Inventories
+M1SL,Money and Credit
+M2SL,Money and Credit
+M2REAL,Money and Credit
+BOGMBASE,Money and Credit
+TOTRESNS,Money and Credit
+NONBORRES,Money and Credit
+BUSLOANS,Money and Credit
+REALLN,Money and Credit
+NONREVSL,Money and Credit
+CONSPI,Money and Credit
+S&P 500,Stock Market
+S&P div yield,Stock Market
+S&P PE ratio,Stock Market
+FEDFUNDS,Interest Rate and Exchange Rates
+CP3Mx,Interest Rate and Exchange Rates
+TB3MS,Interest Rate and Exchange Rates
+TB6MS,Interest Rate and Exchange Rates
+GS1,Interest Rate and Exchange Rates
+GS5,Interest Rate and Exchange Rates
+GS10,Interest Rate and Exchange Rates
+AAA,Interest Rate and Exchange Rates
+BAA,Interest Rate and Exchange Rates
+COMPAPFFx,Interest Rate and Exchange Rates
+TB3SMFFM,Interest Rate and Exchange Rates
+TB6SMFFM,Interest Rate and Exchange Rates
+T1YFFM,Interest Rate and Exchange Rates
+T5YFFM,Interest Rate and Exchange Rates
+T10YFFM,Interest Rate and Exchange Rates
+AAAFFM,Interest Rate and Exchange Rates
+BAAFFM,Interest Rate and Exchange Rates
+TWEXAFEGSMTHx,Interest Rate and Exchange Rates
+EXSZUSx,Interest Rate and Exchange Rates
+EXJPUSx,Interest Rate and Exchange Rates
+EXUSUKx,Interest Rate and Exchange Rates
+EXCAUSx,Interest Rate and Exchange Rates
+WPSFD49207,Prices
+WPSFD49502,Prices
+WPSID61,Prices
+WPSID62,Prices
+OILPRICEx,Prices
+PPICMM,Prices
+CPIAUCSL,Prices
+CPIAPPSL,Prices
+CPITRNSL,Prices
+CPIMEDSL,Prices
+CUSR0000SAC,Prices
+CUSR0000SAD,Prices
+CUSR0000SAS,Prices
+CPIULFSL,Prices
+CUSR0000SA0L2,Prices
+CUSR0000SA0L5,Prices
+PCEPI,Prices
+DDURRG3M086SBEA,Prices
+DNDGRG3M086SBEA,Prices
+DSERRG3M086SBEA,Prices
+CES0600000008,Labor Market
+CES2000000008,Labor Market
+CES3000000008,Labor Market
+UMCSENTx,Orders and Inventories
+DTCOLNVHFNM,Money and Credit
+DTCTHFNM,Money and Credit
+INVEST,Money and Credit
+VIXCLSx,Stock Market

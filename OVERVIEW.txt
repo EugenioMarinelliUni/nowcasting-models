@@ -1,0 +1,28 @@
+.
+|-- data
+|   `-- metadata
+|-- scripts
+|   |-- data
+|   |-- ingestion
+|   |-- bootstrap.py
+|   |-- check_series_metadata.py
+|   |-- download_data.py
+|   |-- eda.py
+|   |-- export_series_labels.py
+|   |-- generate_group_map.py
+|   |-- generate_tcode_map.py
+|   |-- group_analysis.py
+|   |-- inspect_raw_csv.py
+|   |-- run_deseasonalization.py
+|   |-- run_pipeline.py
+|   `-- run_preprocessing.py
+|-- src
+|   `-- dfm_pipeline
+|-- .gitignore
+|-- README.md
+|-- config.yaml
+|-- pyproject.toml
+|-- requirements.txt
+`-- series_labels.txt
+
+7 directories, 18 files

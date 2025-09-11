@@ -1,0 +1,33 @@
+src
+`-- dfm_pipeline
+    |-- eda
+    |   |-- __init__.py
+    |   `-- exploration.py
+    |-- ingestion
+    |   |-- __init__.py
+    |   |-- downloader.py
+    |   `-- fred_md.py
+    |-- modelling
+    |   `-- __init__.py
+    |-- preprocessing
+    |   |-- __init__.py
+    |   |-- deseasonalization.py
+    |   |-- factors.py
+    |   `-- tcode.py
+    |-- utils
+    |   |-- __init__.py
+    |   |-- config_loader.py
+    |   |-- data_loader.py
+    |   |-- grouping_series.py
+    |   |-- hashing.py
+    |   |-- metadata_tools.py
+    |   |-- preprocess_fred_md_pipeline.py
+    |   |-- raw_data_inspector.py
+    |   `-- series_transformations.py
+    |-- validation
+    |   |-- __init__.py
+    |   |-- check_frequency_and_seasonality.py
+    |   `-- tcode_map.py
+    `-- __init__.py
+
+7 directories, 23 files

@@ -1,0 +1,4 @@
+paths:
+  remote_url: "https://www.stlouisfed.org/-/media/project/frbstl/stlouisfed/research/fred-md/monthly/current.csv?sc_lang=en&hash=80445D12401C59CF716410F3F7863B64"
+  raw_filename: "fred_md_current.csv"
+

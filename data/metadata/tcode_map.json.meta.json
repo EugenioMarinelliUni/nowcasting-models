@@ -1,0 +1,9 @@
+{
+  "csv_path": "data\\raw_data\\fred_md_current.csv",
+  "csv_sha256": "2bb11fdbfa144d4adf07f19455708e0c25b4d53a0ec41d3d3c648a5b313a3b84",
+  "extra_in_tcodes": [],
+  "mapping_json_path": "data\\metadata\\tcode_map.json",
+  "missing_in_tcodes": [],
+  "n_series": 126,
+  "tcode_row": 1
+}

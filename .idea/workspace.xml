@@ -1,18 +1,109 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
+  <component name="AutoImportSettings">
+    <option name="autoReloadType" value="SELECTIVE" />
+  </component>
   <component name="ChangeListManager">
-    <list default="true" id="571edde4-19ad-40f7-b41f-8bb98b33649f" name="Changes" comment="" />
+    <list default="true" id="571edde4-19ad-40f7-b41f-8bb98b33649f" name="Changes" comment="">
+      <change afterPath="$PROJECT_DIR$/.gitignore" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.idea/runConfigurations/check_series_metadata.xml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.idea/runConfigurations/download_data.xml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.idea/runConfigurations/exploration.xml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.idea/runConfigurations/export_series_labels.xml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.idea/runConfigurations/run_deseasonalization.xml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.idea/runConfigurations/run_pipeline.xml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/OVERVIEW.txt" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/SRC.txt" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/STRUCTURE.txt" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/TREE.md" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/build_trace.html" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/config.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/data/metadata/series_failed_to_check.txt" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/data/metadata/series_metadata_report.txt" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/data/metadata/tcode_map.json" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/data/metadata/tcode_map.json.meta.json" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/data/metadata/variable_group_map.json" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/data/metadata/variable_groups.csv" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/dep-tree.json" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/profile.html" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/pyproject.toml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/requirements.txt" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/scripts/bootstrap.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/scripts/check_series_metadata.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/scripts/data/metadata/variable_group_map.json" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/scripts/download_data.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/scripts/eda.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/scripts/export_series_labels.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/scripts/generate_group_map.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/scripts/generate_tcode_map.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/scripts/group_analysis.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/scripts/ingestion/build_transformed_panel.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/scripts/ingestion/extract_tcodes.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/scripts/inspect_raw_csv.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/scripts/run_deseasonalization.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/scripts/run_pipeline.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/scripts/run_preprocessing.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/series_labels.txt" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/dfm_pipeline/__init__.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/dfm_pipeline/eda/__init__.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/dfm_pipeline/eda/exploration.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/dfm_pipeline/ingestion/__init__.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/dfm_pipeline/ingestion/downloader.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/dfm_pipeline/ingestion/fred_md.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/dfm_pipeline/modelling/__init__.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/dfm_pipeline/preprocessing/__init__.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/dfm_pipeline/preprocessing/deseasonalization.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/dfm_pipeline/preprocessing/factors.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/dfm_pipeline/preprocessing/tcode.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/dfm_pipeline/utils/__init__.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/dfm_pipeline/utils/config_loader.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/dfm_pipeline/utils/data_loader.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/dfm_pipeline/utils/grouping_series.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/dfm_pipeline/utils/hashing.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/dfm_pipeline/utils/metadata_tools.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/dfm_pipeline/utils/preprocess_fred_md_pipeline.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/dfm_pipeline/utils/raw_data_inspector.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/dfm_pipeline/utils/series_transformations.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/dfm_pipeline/validation/__init__.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/dfm_pipeline/validation/check_frequency_and_seasonality.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/src/dfm_pipeline/validation/tcode_map.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/DFM_project_final.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/DFM_project_final.iml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+    </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
     <option name="LAST_RESOLUTION" value="IGNORE" />
   </component>
+  <component name="FileTemplateManagerImpl">
+    <option name="RECENT_TEMPLATES">
+      <list>
+        <option value="Python Script" />
+      </list>
+    </option>
+  </component>
   <component name="Git.Settings">
     <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
   </component>
-  <component name="ProjectColorInfo"><![CDATA[{
-  "associatedIndex": 4
+  <component name="GitHubPullRequestSearchHistory"><![CDATA[{
+  "lastFilter": {
+    "state": "OPEN",
+    "assignee": "EugenioMarinelliUni"
+  }
 }]]></component>
+  <component name="GithubDefaultAccount">
+    <option name="defaultAccountId" value="8828417d-baad-4f29-8d48-24afd5e73188" />
+  </component>
+  <component name="GithubPullRequestsUISettings"><![CDATA[{
+  "selectedUrlAndAccountId": {
+    "url": "https://github.com/EugenioMarinelliUni/nowcasting-models",
+    "accountId": "8828417d-baad-4f29-8d48-24afd5e73188"
+  }
+}]]></component>
+  <component name="ProjectColorInfo">{
+  &quot;associatedIndex&quot;: 4
+}</component>
   <component name="ProjectId" id="2ycrIuJofVf8SnGUvmjInj5wBSC" />
   <component name="ProjectViewState">
     <option name="hideEmptyMiddlePackages" value="true" />
@@ -21,17 +112,200 @@
   <component name="PropertiesComponent"><![CDATA[{
   "keyToString": {
     "ModuleVcsDetector.initialDetectionPerformed": "true",
+    "Python.check_series_metadata.executor": "Run",
+    "Python.download_data.executor": "Run",
+    "Python.exploration.executor": "Run",
+    "Python.export_series_labels.executor": "Run",
+    "Python.generate_group_map (1).executor": "Run",
+    "Python.generate_group_map.executor": "Run",
+    "Python.generate_tcode_map.executor": "Run",
+    "Python.group_analysis.executor": "Run",
+    "Python.raw_data_inspector.executor": "Run",
+    "Python.run_pipeline.executor": "Run",
+    "Python.run_preprocessing.executor": "Run",
     "RunOnceActivity.ShowReadmeOnStart": "true",
-    "git-widget-placeholder": "master",
+    "RunOnceActivity.git.unshallow": "true",
+    "git-widget-placeholder": "main",
+    "ignore.virus.scanning.warn.message": "true",
+    "node.js.detected.package.eslint": "true",
+    "node.js.detected.package.tslint": "true",
+    "node.js.selected.package.eslint": "(autodetect)",
+    "node.js.selected.package.tslint": "(autodetect)",
     "nodejs_package_manager_path": "npm",
+    "settings.editor.selected.configurable": "org.jetbrains.plugins.github.ui.GithubSettingsConfigurable",
     "vue.rearranger.settings.migration": "true"
   }
 }]]></component>
+  <component name="RunManager" selected="Python.run_preprocessing">
+    <configuration default="true" type="PythonConfigurationType" factoryName="Python">
+      <module name="DFM_project_final" />
+      <option name="ENV_FILES" value="" />
+      <option name="INTERPRETER_OPTIONS" value="" />
+      <option name="PARENT_ENVS" value="true" />
+      <envs>
+        <env name="PYTHONUNBUFFERED" value="1" />
+      </envs>
+      <option name="SDK_HOME" value="" />
+      <option name="SDK_NAME" value="Python 3.13 (DFM_project_final)" />
+      <option name="WORKING_DIRECTORY" value="" />
+      <option name="IS_MODULE_SDK" value="false" />
+      <option name="ADD_CONTENT_ROOTS" value="true" />
+      <option name="ADD_SOURCE_ROOTS" value="true" />
+      <EXTENSION ID="PythonCoverageRunConfigurationExtension" runner="coverage.py" />
+      <option name="SCRIPT_NAME" value="" />
+      <option name="PARAMETERS" value="" />
+      <option name="SHOW_COMMAND_LINE" value="false" />
+      <option name="EMULATE_TERMINAL" value="false" />
+      <option name="MODULE_MODE" value="false" />
+      <option name="REDIRECT_INPUT" value="false" />
+      <option name="INPUT_FILE" value="" />
+      <method v="2" />
+    </configuration>
+    <configuration name="generate_group_map" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
+      <module name="DFM_project_final" />
+      <option name="ENV_FILES" value="" />
+      <option name="INTERPRETER_OPTIONS" value="" />
+      <option name="PARENT_ENVS" value="true" />
+      <envs>
+        <env name="PYTHONUNBUFFERED" value="1" />
+      </envs>
+      <option name="SDK_HOME" value="" />
+      <option name="SDK_NAME" value="Python 3.13 (DFM_project_final)" />
+      <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$/scripts" />
+      <option name="IS_MODULE_SDK" value="true" />
+      <option name="ADD_CONTENT_ROOTS" value="true" />
+      <option name="ADD_SOURCE_ROOTS" value="true" />
+      <EXTENSION ID="PythonCoverageRunConfigurationExtension" runner="coverage.py" />
+      <option name="SCRIPT_NAME" value="$PROJECT_DIR$/scripts/generate_group_map.py" />
+      <option name="PARAMETERS" value="" />
+      <option name="SHOW_COMMAND_LINE" value="false" />
+      <option name="EMULATE_TERMINAL" value="false" />
+      <option name="MODULE_MODE" value="false" />
+      <option name="REDIRECT_INPUT" value="false" />
+      <option name="INPUT_FILE" value="" />
+      <method v="2" />
+    </configuration>
+    <configuration name="generate_tcode_map" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
+      <module name="DFM_project_final" />
+      <option name="ENV_FILES" value="" />
+      <option name="INTERPRETER_OPTIONS" value="" />
+      <option name="PARENT_ENVS" value="true" />
+      <envs>
+        <env name="PYTHONUNBUFFERED" value="1" />
+      </envs>
+      <option name="SDK_HOME" value="" />
+      <option name="SDK_NAME" value="Python 3.13 (DFM_project_final)" />
+      <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$/scripts" />
+      <option name="IS_MODULE_SDK" value="true" />
+      <option name="ADD_CONTENT_ROOTS" value="true" />
+      <option name="ADD_SOURCE_ROOTS" value="true" />
+      <EXTENSION ID="PythonCoverageRunConfigurationExtension" runner="coverage.py" />
+      <option name="SCRIPT_NAME" value="$PROJECT_DIR$/scripts/generate_tcode_map.py" />
+      <option name="PARAMETERS" value="" />
+      <option name="SHOW_COMMAND_LINE" value="false" />
+      <option name="EMULATE_TERMINAL" value="false" />
+      <option name="MODULE_MODE" value="false" />
+      <option name="REDIRECT_INPUT" value="false" />
+      <option name="INPUT_FILE" value="" />
+      <method v="2" />
+    </configuration>
+    <configuration name="group_analysis" type="PythonConfigurationType" factoryName="Python">
+      <module name="DFM_project_final" />
+      <option name="ENV_FILES" value="" />
+      <option name="INTERPRETER_OPTIONS" value="" />
+      <option name="PARENT_ENVS" value="true" />
+      <envs>
+        <env name="PYTHONUNBUFFERED" value="1" />
+      </envs>
+      <option name="SDK_HOME" value="" />
+      <option name="SDK_NAME" value="Python 3.13 (DFM_project_final)" />
+      <option name="WORKING_DIRECTORY" value="C:\Users\eugen\Desktop\dfm_project_final" />
+      <option name="IS_MODULE_SDK" value="false" />
+      <option name="ADD_CONTENT_ROOTS" value="true" />
+      <option name="ADD_SOURCE_ROOTS" value="true" />
+      <EXTENSION ID="PythonCoverageRunConfigurationExtension" runner="coverage.py" />
+      <option name="SCRIPT_NAME" value="$PROJECT_DIR$/scripts/group_analysis.py" />
+      <option name="PARAMETERS" value="" />
+      <option name="SHOW_COMMAND_LINE" value="false" />
+      <option name="EMULATE_TERMINAL" value="false" />
+      <option name="MODULE_MODE" value="false" />
+      <option name="REDIRECT_INPUT" value="false" />
+      <option name="INPUT_FILE" value="" />
+      <method v="2" />
+    </configuration>
+    <configuration name="raw_data_inspector" type="PythonConfigurationType" factoryName="Python">
+      <module name="DFM_project_final" />
+      <option name="ENV_FILES" value="" />
+      <option name="INTERPRETER_OPTIONS" value="" />
+      <option name="PARENT_ENVS" value="true" />
+      <envs>
+        <env name="PYTHONUNBUFFERED" value="1" />
+      </envs>
+      <option name="SDK_HOME" value="" />
+      <option name="SDK_NAME" value="Python 3.13 (DFM_project_final)" />
+      <option name="WORKING_DIRECTORY" value="C:\Users\eugen\Desktop\dfm_project_final" />
+      <option name="IS_MODULE_SDK" value="false" />
+      <option name="ADD_CONTENT_ROOTS" value="true" />
+      <option name="ADD_SOURCE_ROOTS" value="true" />
+      <EXTENSION ID="PythonCoverageRunConfigurationExtension" runner="coverage.py" />
+      <option name="SCRIPT_NAME" value="$PROJECT_DIR$/scripts/inspect_raw_csv.py" />
+      <option name="PARAMETERS" value="" />
+      <option name="SHOW_COMMAND_LINE" value="false" />
+      <option name="EMULATE_TERMINAL" value="false" />
+      <option name="MODULE_MODE" value="false" />
+      <option name="REDIRECT_INPUT" value="false" />
+      <option name="INPUT_FILE" value="" />
+      <method v="2" />
+    </configuration>
+    <configuration name="run_preprocessing" type="PythonConfigurationType" factoryName="Python">
+      <module name="DFM_project_final" />
+      <option name="ENV_FILES" value="" />
+      <option name="INTERPRETER_OPTIONS" value="" />
+      <option name="PARENT_ENVS" value="true" />
+      <envs>
+        <env name="PYTHONUNBUFFERED" value="1" />
+      </envs>
+      <option name="SDK_HOME" value="" />
+      <option name="SDK_NAME" value="Python 3.13 (DFM_project_final)" />
+      <option name="WORKING_DIRECTORY" value="C:\Users\eugen\Desktop\dfm_project_final" />
+      <option name="IS_MODULE_SDK" value="false" />
+      <option name="ADD_CONTENT_ROOTS" value="true" />
+      <option name="ADD_SOURCE_ROOTS" value="true" />
+      <EXTENSION ID="PythonCoverageRunConfigurationExtension" runner="coverage.py" />
+      <option name="SCRIPT_NAME" value="$PROJECT_DIR$/scripts/run_preprocessing.py" />
+      <option name="PARAMETERS" value="" />
+      <option name="SHOW_COMMAND_LINE" value="false" />
+      <option name="EMULATE_TERMINAL" value="false" />
+      <option name="MODULE_MODE" value="false" />
+      <option name="REDIRECT_INPUT" value="false" />
+      <option name="INPUT_FILE" value="" />
+      <method v="2" />
+    </configuration>
+    <list>
+      <item itemvalue="Python.group_analysis" />
+      <item itemvalue="Python.raw_data_inspector" />
+      <item itemvalue="Python.run_preprocessing" />
+      <item itemvalue="Python.check_series_metadata" />
+      <item itemvalue="Python.download_data" />
+      <item itemvalue="Python.exploration" />
+      <item itemvalue="Python.export_series_labels" />
+      <item itemvalue="Python.run_deseasonalization" />
+      <item itemvalue="Python.run_pipeline" />
+      <item itemvalue="Python.generate_group_map" />
+      <item itemvalue="Python.generate_tcode_map" />
+    </list>
+    <recent_temporary>
+      <list>
+        <item itemvalue="Python.generate_group_map" />
+        <item itemvalue="Python.generate_tcode_map" />
+      </list>
+    </recent_temporary>
+  </component>
   <component name="SharedIndexes">
     <attachedChunks>
       <set>
-        <option value="bundled-js-predefined-d6986cc7102b-6a121458b545-JavaScript-PY-251.25410.159" />
-        <option value="bundled-python-sdk-e0ed3721d81e-36ea0e71a18c-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-251.25410.159" />
+        <option value="bundled-js-predefined-d6986cc7102b-b598e85cdad2-JavaScript-PY-252.25557.178" />
+        <option value="bundled-python-sdk-ce6832f46686-7b97d883f26b-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-252.25557.178" />
       </set>
     </attachedChunks>
   </component>
@@ -42,11 +316,49 @@
       <option name="number" value="Default" />
       <option name="presentableId" value="Default" />
       <updated>1750144625552</updated>
-      <workItem from="1750144626596" duration="1000" />
+      <workItem from="1750144626596" duration="55418000" />
+      <workItem from="1750923136977" duration="2522000" />
+      <workItem from="1750929408888" duration="14862000" />
+      <workItem from="1753161843315" duration="339000" />
+      <workItem from="1753162696373" duration="2384000" />
+      <workItem from="1753217418558" duration="1818000" />
+      <workItem from="1753567132816" duration="9972000" />
+      <workItem from="1753650091362" duration="17047000" />
+      <workItem from="1756453729714" duration="1042000" />
+      <workItem from="1756455105741" duration="274000" />
+      <workItem from="1756455397808" duration="38123000" />
+      <workItem from="1757328808998" duration="1422000" />
+      <workItem from="1757330822930" duration="67000" />
+      <workItem from="1757435720228" duration="6356000" />
+      <workItem from="1757543585757" duration="7295000" />
     </task>
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
     <option name="version" value="3" />
+  </component>
+  <component name="Vcs.Log.Tabs.Properties">
+    <option name="TAB_STATES">
+      <map>
+        <entry key="MAIN">
+          <value>
+            <State />
+          </value>
+        </entry>
+      </map>
+    </option>
+  </component>
+  <component name="com.intellij.coverage.CoverageDataManagerImpl">
+    <SUITE FILE_PATH="coverage/DFM_project_final$exploration.coverage" NAME="exploration Coverage Results" MODIFIED="1750464886962" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="C:\Users\eugen\Desktop\dfm_project_final" />
+    <SUITE FILE_PATH="coverage/DFM_project_final$group_analysis.coverage" NAME="group_analysis Coverage Results" MODIFIED="1750921019115" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="C:\Users\eugen\Desktop\dfm_project_final" />
+    <SUITE FILE_PATH="coverage/DFM_project_final$generate_tcode_map.coverage" NAME="generate_tcode_map Coverage Results" MODIFIED="1753643545396" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/scripts" />
+    <SUITE FILE_PATH="coverage/DFM_project_final$download_data.coverage" NAME="download_data Coverage Results" MODIFIED="1750447332305" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="C:\Users\eugen\Desktop\dfm_project_final" />
+    <SUITE FILE_PATH="coverage/DFM_project_final$run_pipeline.coverage" NAME="run_pipeline Coverage Results" MODIFIED="1750440543510" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="C:\Users\eugen\Desktop\dfm_project_final" />
+    <SUITE FILE_PATH="coverage/DFM_project_final$check_series_metadata.coverage" NAME="check_series_metadata Coverage Results" MODIFIED="1750934187161" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="C:\Users\eugen\Desktop\dfm_project_final" />
+    <SUITE FILE_PATH="coverage/DFM_project_final$run_preprocessing.coverage" NAME="run_preprocessing Coverage Results" MODIFIED="1753700539748" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="C:\Users\eugen\Desktop\dfm_project_final" />
+    <SUITE FILE_PATH="coverage/DFM_project_final$generate_group_map.coverage" NAME="generate_group_map Coverage Results" MODIFIED="1753650033739" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/scripts" />
+    <SUITE FILE_PATH="coverage/DFM_project_final$export_series_labels.coverage" NAME="export_series_labels Coverage Results" MODIFIED="1750670981769" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="C:\Users\eugen\Desktop\dfm_project_final" />
+    <SUITE FILE_PATH="coverage/DFM_project_final$generate_group_map__1_.coverage" NAME="generate_group_map (1) Coverage Results" MODIFIED="1753650897926" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/scripts" />
+    <SUITE FILE_PATH="coverage/DFM_project_final$raw_data_inspector.coverage" NAME="raw_data_inspector Coverage Results" MODIFIED="1750670858625" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="C:\Users\eugen\Desktop\dfm_project_final" />
   </component>
 </project>
