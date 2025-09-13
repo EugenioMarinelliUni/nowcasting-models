@@ -23,11 +23,28 @@ dist/
 data/raw_data/
 data/processed_data/
 data/external/
-outputs/
+outputs/*
 models/
 logs/
+
 # keep metadata / samples / docs
 !data/metadata/
 !data/metadata/**
 !data/README.md
 !outputs/README.md
+
+# IDE
+.idea/
+
+# Generated / helper dumps
+OVERVIEW.txt
+SRC.txt
+STRUCTURE.txt
+TREE.md
+README.new
+build_trace.html
+profile.html
+dep-tree.json
+
+# Script-local data
+scripts/data/
