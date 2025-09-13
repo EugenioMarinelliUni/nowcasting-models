@@ -48,3 +48,5 @@ dep-tree.json
 
 # Script-local data
 scripts/data/
+build_trace.html
+profile.html
