@@ -48,5 +48,8 @@ dep-tree.json
 
 # Script-local data
 scripts/data/
-build_trace.html
-profile.html
+
+# --- Keep only one QC artifact ---
+data/quality_checks/*
+!data/quality_checks/missing_positions_summary.csv
+!data/quality_checks/README.md
