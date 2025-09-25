@@ -1,4 +1,92 @@
+# config.yaml
+
+# -------------------------
+# Paths & data locations
+# -------------------------
 paths:
+  # FRED-MD (predictors) – monthly panel source
   remote_url: "https://www.stlouisfed.org/-/media/project/frbstl/stlouisfed/research/fred-md/monthly/current.csv?sc_lang=en&hash=80445D12401C59CF716410F3F7863B64"
   raw_filename: "fred_md_current.csv"
+
+  # Processed panels (after preprocessing, before extra transforms)
+  processed_dir: "data/processed_data"
+  panel_1965: "data/processed_data/panel_start_1965_keep_late.csv"
+  panel_1960: "data/processed_data/panel_start_1960_drop_late.csv"
+
+  # Final “delta” panels (after extra differencing on housing series)
+  # (you created this new subfolder)
+  panel_1965_fixhousing_delta: "data/processed_data/stationarity/panel_start_1965_keep_late_fixhousing_delta.csv"
+  panel_1960_fixhousing_delta: "data/processed_data/stationarity/panel_start_1960_drop_late_fixhousing_delta.csv"
+
+  # Targets (GDP QoQ SAAR from ALFRED/FRED)
+  targets_raw_dir: "data/raw_data/targets/gdp"
+  targets_processed_dir: "data/processed_data/targets"
+
+  # QC / diagnostics (where scripts write summaries)
+  qc_dir: "data/quality_checks"
+  meta_dir: "data/metadata"
+
+  # Useful explicit paths for current stationarity summaries
+  stationarity_original_1965: "data/quality_checks/stationarity/panel_start_1965_keep_late_stationarity.csv"
+  stationarity_original_1960: "data/quality_checks/stationarity/panel_start_1960_drop_late_stationarity.csv"
+  stationarity_fix_1965: "data/quality_checks/stationarity_fix/panel_start_1965_keep_late_fixhousing_delta_stationarity.csv"
+  stationarity_fix_1960: "data/quality_checks/stationarity_fix/panel_start_1960_drop_late_fixhousing_delta_stationarity.csv"
+
+# -------------------------
+# Date & parsing settings
+# -------------------------
+dates:
+  date_col: "sasdate"
+  csv_format: "%m/%d/%Y"   # mm/dd/yyyy when writing CSVs
+  monthly_freq: "MS"       # enforce Month-Start frequency when reindexing
+
+# -------------------------
+# FRED / ALFRED API (target variable)
+# -------------------------
+fred:
+  api_url: "https://api.stlouisfed.org/fred/series/observations"
+  series_id: "A191RL1Q225SBEA"     # Real GDP: Percent Change from Preceding Period, SAAR (QoQ)
+  # API key is read from .env as FRED_API_KEY; do not put secrets here
+
+# -------------------------
+# Preprocessing rules
+# -------------------------
+preprocessing:
+  # Column-dropping thresholds (earlier in pipeline)
+  missing_share_max: 0.40
+  leading_na_limit_months: 24
+  interior_gap_max_months: 6
+  min_obs_train_months: 36
+
+  # Training window selection (coverage-based, data-agnostic)
+  coverage_threshold: 0.75
+  train_years: 30
+  holdout_months: 60
+  min_run_consecutive: 12
+
+  # Extra per-series transforms (AFTER standard t-codes, BEFORE standardization)
+  # Supported: "diff" (x_t - x_{t-1}), "yoy" (x_t - x_{t-12})
+  extra_transforms:
+    HOUSTMW: diff
+    PERMITMW: diff
+  applied_after_tcodes: true
+
+# -------------------------
+# Stationarity test defaults
+# -------------------------
+stationarity:
+  alpha: 0.05
+  kpss_reg: "ct"        # "c" for level, "ct" for trend
+  adf_autolag: "AIC"
+  kpss_nlags: "auto"
+  # Optional extras (require 'arch' for PP/DF-GLS)
+  run_pp: true
+  run_dfgls: true
+  run_za: true
+  pp_trend: "c"
+  dfgls_trend: "c"
+  za_reg: "ct"
+
+
+
 
