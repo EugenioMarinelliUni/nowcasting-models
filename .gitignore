@@ -19,24 +19,39 @@ dist/
 # --- Notebooks ---
 **/.ipynb_checkpoints/
 
-# --- Data (keep metadata small files tracked) ---
+# --- Data (large, generated) ---
 data/raw_data/
 data/processed_data/
 data/external/
-outputs/*
+dataset/**
+output/**           # singular
+outputs/**          # plural, just in case
 models/
 logs/
 
-# keep metadata / samples / docs
-!data/metadata/
-!data/metadata/**
-!data/README.md
-!outputs/README.md
+# --- Generated metadata we DO NOT want ---
+data/metadata/scalers/**
+data/metadata/variants/**
 
-# IDE
+# --- Metadata we DO want (inputs, small JSON) ---
+!data/metadata/
+!data/metadata/backtest/**
+!data/metadata/series_maps/**
+!data/metadata/variable_group_map_*.json
+!data/metadata/README.md
+
+# --- Quality checks: keep only explicit small files ---
+data/quality_checks/**
+!data/quality_checks/README.md
+!data/quality_checks/missing_positions_summary.csv
+
+# --- Scripts-local data ---
+scripts/data/
+
+# --- IDE ---
 .idea/
 
-# Generated / helper dumps
+# --- Helper dumps (local only) ---
 OVERVIEW.txt
 SRC.txt
 STRUCTURE.txt
@@ -45,11 +60,3 @@ README.new
 build_trace.html
 profile.html
 dep-tree.json
-
-# Script-local data
-scripts/data/
-
-# --- Keep only one QC artifact ---
-data/quality_checks/*
-!data/quality_checks/missing_positions_summary.csv
-!data/quality_checks/README.md
