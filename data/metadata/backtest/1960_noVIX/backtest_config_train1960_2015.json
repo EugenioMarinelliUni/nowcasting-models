@@ -1,0 +1,63 @@
+{
+  "schema_version": "1.1",
+  "panel_id": "1960_noVIX",
+  "index_freq": "MS",
+  "time_spans": {
+    "train": {
+      "start": "1960-01",
+      "end": "2015-12"
+    },
+    "eval": {
+      "start": "1960-01",
+      "end": "2025-03"
+    }
+  },
+  "snapshot": {
+    "rule": "BM"
+  },
+  "standardization": {
+    "mode": "frozen",
+    "mean_map_path": "data/metadata/scalers/mean_map_1960_noVIX_train1960_2015.json",
+    "std_map_path": "data/metadata/scalers/std_map_1960_noVIX_train1960_2015.json"
+  },
+  "masking": {
+    "mode": "constant_lag",
+    "lag_map_path": "data/metadata/series_maps/lag_map_1960_noVIX.json"
+  },
+  "series_maps": {
+    "group_map_path": "data/metadata/series_maps/variable_group_map_1960_noVIX.json",
+    "tcode_map_path": "data/metadata/series_maps/tcode_map.json"
+  },
+  "covid_handling": {
+    "variant": "baseline",
+    "window": [
+      "2020-03",
+      "2020-09"
+    ],
+    "winsor_clip_sigma": 6.0,
+    "dummies_path": null,
+    "weights_path": null
+  },
+  "target": {
+    "id": "A191RL1Q225SBEA",
+    "aggregation": "quarterly_to_monthly_last_month",
+    "lag_quarters": 1
+  },
+  "paths": {
+    "dataset_root": "dataset/1960_noVIX",
+    "panel_file": "baseline/X_panel_z.csv",
+    "target_file": "baseline/y_target_z.csv"
+  },
+  "evaluation": {
+    "metrics": [
+      "RMSE",
+      "MAE"
+    ],
+    "horizons": [
+      "backcast",
+      "nowcast",
+      "forecast"
+    ]
+  },
+  "notes": "BM; frozen scalers 1960\u20132015; no VIX."
+}
