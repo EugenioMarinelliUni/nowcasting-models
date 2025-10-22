@@ -1,4 +1,3 @@
-# src/dfm_pipeline/validation/stationarity.py
 from __future__ import annotations
 
 from typing import Optional, Dict, Any, Literal
@@ -15,10 +14,14 @@ try:
 except Exception:
     _HAVE_ARCH = False
 
+# Re-export for callers (e.g., CLI warnings)
+HAVE_ARCH: bool = _HAVE_ARCH
 
 __all__ = [
     "run_stationarity_tests_on_series",
     "run_stationarity_tests_on_panel",
+    "panel_stationarity",  # alias
+    "HAVE_ARCH",
 ]
 
 
@@ -132,14 +135,13 @@ def run_stationarity_tests_on_series(
         pvals: list[float] = []
         stats: list[float] = []
         breaks: list[Any] = []
-        for trend in ("c", "t", "ct"):  # type: Literal["c","t","ct"]
+        for trend in ("c", "t", "ct"):
             try:
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
                     za = ZivotAndrews(x, trend=trend)  # type: ignore[name-defined]
                 pvals.append(float(za.pvalue))  # type: ignore[attr-defined]
                 stats.append(float(za.stat))    # type: ignore[attr-defined]
-                # Some type checkers don't know 'breakpoint'; use getattr to be safe
                 bi = int(getattr(za, "breakpoint", -1))
                 if 0 <= bi < len(x.index):
                     bts = x.index[bi]
@@ -149,8 +151,7 @@ def run_stationarity_tests_on_series(
             except Exception:
                 continue
         if pvals:
-            # report the most conservative (max p-value)
-            i = int(np.argmax(pvals))
+            i = int(np.argmax(pvals))  # report most conservative (max p-value)
             out["za_pvalue"] = pvals[i]
             out["za_stat"] = stats[i]
             out["za_break_index"] = breaks[i] if isinstance(breaks[i], pd.Timestamp) else np.nan
@@ -168,7 +169,7 @@ def run_stationarity_tests_on_panel(
     df: pd.DataFrame,
     *,
     adf_autolag: Optional[str] = "AIC",
-    kpss_reg: Literal["c", "ct"] = "ct",         # default used in your panel scripts
+    kpss_reg: Literal["c", "ct"] = "ct",         # default here; CLI can override
     kpss_nlags: str | int = "auto",
     run_pp: bool = False,
     run_dfgls: bool = False,
@@ -181,10 +182,12 @@ def run_stationarity_tests_on_panel(
     Returns a DataFrame indexed by series names with the same columns as the
     single-series output plus the final 'decision'.
     """
+    # Keep only numeric columns; callers can pre-clean otherwise
+    X = df.select_dtypes(include="number")
     results: Dict[str, pd.Series] = {}
 
-    for col in df.columns:
-        s = df[col]
+    for col in X.columns:
+        s = X[col]
         res = run_stationarity_tests_on_series(
             s,
             adf_autolag=adf_autolag,
@@ -212,6 +215,30 @@ def run_stationarity_tests_on_panel(
         "n_non_na",
         "decision",
     ]
-    return out[[c for c in preferred if c in out.columns] + [c for c in out.columns if c not in preferred]]
+    return out[[c for c in preferred if c in out.columns] +
+               [c for c in out.columns if c not in preferred]]
 
 
+# ---- Compatibility alias (so older callers using 'panel_stationarity' keep working) ----
+def panel_stationarity(
+    df: pd.DataFrame,
+    *,
+    adf_autolag: Optional[str] = "AIC",
+    kpss_reg: Literal["c", "ct"] = "ct",
+    kpss_nlags: str | int = "auto",
+    run_pp: bool = False,
+    run_dfgls: bool = False,
+    run_za: bool = False,
+    alpha: float = 0.05,
+) -> pd.DataFrame:
+    """Alias to run_stationarity_tests_on_panel for backward compatibility."""
+    return run_stationarity_tests_on_panel(
+        df,
+        adf_autolag=adf_autolag,
+        kpss_reg=kpss_reg,
+        kpss_nlags=kpss_nlags,
+        run_pp=run_pp,
+        run_dfgls=run_dfgls,
+        run_za=run_za,
+        alpha=alpha,
+    )
