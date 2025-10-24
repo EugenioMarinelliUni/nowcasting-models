@@ -1,3 +1,4 @@
+# src/dfm_pipeline/preselection/io.py
 from __future__ import annotations
 
 from pathlib import Path
@@ -6,12 +7,14 @@ import json
 import pandas as pd
 
 
-# ---------- Path helpers ----------
+# ---------- Path helpers (X only from training_sets) ----------
 
-def path_baseline_X(panel: str, tag: str) -> Path:
-    return Path(f"dataset/{panel}/baseline/X_panel_z__{panel}__{tag}.csv")
+def path_training_X(panel: str, tag: str) -> Path:
+    # standardized training panel stored under training_sets
+    return Path(f"dataset/{panel}/training_sets/{tag}/standardized_train__{panel}__{tag}.csv")
 
 def path_baseline_y(panel: str, tag: str) -> Path:
+    # standardized target built earlier (monthly stamps on quarter months)
     return Path(f"dataset/{panel}/baseline/y_target_z__{panel}__{tag}.csv")
 
 def path_meta(panel: str, tag: str, method: str) -> Path:
@@ -27,26 +30,43 @@ def path_preselect_X(panel: str, tag: str, method: str) -> Path:
 
 # ---------- I/O helpers ----------
 
+def _read_panel_csv(p: Path) -> pd.DataFrame:
+    df = pd.read_csv(p, parse_dates=["Date"])
+    if "Date" not in df.columns:
+        raise ValueError(f"'Date' column not found in {p}")
+    return df.set_index("Date").sort_index()
+
 def load_X_y(panel: str, tag: str) -> Tuple[pd.DataFrame, pd.Series]:
     """
-    Load baseline X and y for {panel, tag}, ensure a monthly Date index shared by both.
+    Load X and y for {panel, tag}.
+
+    - X: REQUIRED at dataset/{panel}/training_sets/{tag}/standardized_train__{panel}__{tag}.csv
+    - y: REQUIRED at dataset/{panel}/baseline/y_target_z__{panel}__{tag}.csv
+
+    Ensures indices match; returns (X, y).
     """
-    xp, yp = path_baseline_X(panel, tag), path_baseline_y(panel, tag)
-    if not xp.exists():
-        raise FileNotFoundError(f"Missing X panel: {xp}")
-    if not yp.exists():
-        raise FileNotFoundError(f"Missing y target: {yp}")
+    x_path = path_training_X(panel, tag)
+    y_path = path_baseline_y(panel, tag)
 
-    X = pd.read_csv(xp, parse_dates=["Date"]).set_index("Date").sort_index()
-    ydf = pd.read_csv(yp, parse_dates=["Date"]).set_index("Date").sort_index()
+    if not x_path.exists():
+        raise FileNotFoundError(f"Missing training X: {x_path}")
+    if not y_path.exists():
+        raise FileNotFoundError(f"Missing target y: {y_path}")
 
-    # First (or only) column is the target
-    y = ydf.iloc[:, 0].astype(float)
+    X = _read_panel_csv(x_path)
+    y_df = _read_panel_csv(y_path)
+
+    # first (or only) column is y
+    y = y_df.iloc[:, 0].astype(float)
 
     if not X.index.equals(y.index):
         raise ValueError(
-            f"Index mismatch between X ({xp}) and y ({yp}). "
-            "Make sure both are on the same monthly MS/ME index."
+            "Index mismatch between X and y.\n"
+            f"  X: {x_path}\n"
+            f"  y: {y_path}\n"
+            f"  X range: {X.index.min()} .. {X.index.max()}  (n={len(X)})\n"
+            f"  y range: {y.index.min()} .. {y.index.max()}  (n={len(y)})\n"
+            "Ensure both are on the same monthly index and same train-tag slice."
         )
     return X, y
 
