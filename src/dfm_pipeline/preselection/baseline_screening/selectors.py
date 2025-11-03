@@ -1,236 +1,317 @@
+#!/usr/bin/env python3
+"""
+Selectors: SIS, t-stat (HAC + optional AR(y) + optional X aggregation + optional ADL block),
+LARS with TimeSeriesSplit.
+
+Public API (dataframe in, list[str] out)
+----------------------------------------
+sis_select(X, y, *, min_features, max_features, dedup_tau, sis_tau=0.0, sis_topn=0)
+tstat_select(X, y, *, min_features, max_features, dedup_tau, tstat_alpha=0.05, tstat_topn=0,
+             hac_lags="auto", ar_lags=0, agg_rule_map=None, agg_rule_default=None,
+             x_adl_lags=0, adl_score="fstat")
+lars_select(X, y, *, min_features, max_features, dedup_tau, cv=10)
+"""
 from __future__ import annotations
 
-from typing import List, Dict, Tuple
+from typing import Iterable, List, Tuple, Optional, Dict, cast
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import LassoLarsCV
 
-from .io import load_X_y, write_selected_meta, write_preselected_panel
+# Optional deps
+try:
+    import statsmodels.api as sm
+except Exception:  # pragma: no cover
+    sm = None
 
+try:
+    from sklearn.linear_model import LassoLarsCV
+    from sklearn.model_selection import TimeSeriesSplit
+except Exception:  # pragma: no cover
+    LassoLarsCV = None  # type: ignore[assignment]
+    TimeSeriesSplit = None  # type: ignore[assignment]
 
-# ---------- Utilities ----------
+# ---------- utilities ----------
+def _align_dropna(X: pd.DataFrame, y: pd.Series) -> Tuple[pd.DataFrame, pd.Series]:
+    common = X.index.intersection(y.index)
+    yc = y.loc[common].dropna()
+    Xc = X.loc[yc.index]
+    Xc = Xc.dropna(axis=1, how="all")
+    return Xc, yc
 
-def mask_train_rows(y: pd.Series) -> pd.Series:
-    """Months where the quarterly target is observed (e.g., Jan/Apr/Jul/Oct)."""
-    return y.notna()
+def _abs_pearson(x: pd.Series, y: pd.Series) -> float:
+    s = pd.concat([x, y], axis=1).dropna()
+    if len(s) < 3:
+        return np.nan
+    return float(abs(s.iloc[:, 0].corr(s.iloc[:, 1])))
 
-def dedup_by_corr(X: pd.DataFrame, cols: List[str], tau: float) -> List[str]:
-    """
-    Greedy de-duplication: keep first occurrence, drop others whose |corr| >= tau with any kept.
-    """
-    if len(cols) <= 1:
-        return cols
-    C = X[cols].corr().abs()
-    keep: List[str] = []
-    seen: set[str] = set()
-    for c in cols:
-        if c in seen:
-            continue
-        keep.append(c)
-        dup = C.index[(C[c] >= tau) & (C.index != c)]
-        seen.update(dup)
-    return keep
+def _rank_features_by_abs_corr(X: pd.DataFrame, y: pd.Series) -> pd.Series:
+    vals = {c: _abs_pearson(X[c], y) for c in X.columns}
+    return pd.Series(vals, dtype="float64").dropna().sort_values(ascending=False)
 
+def _dedup_by_corr(features: List[str], X: pd.DataFrame, tau: float) -> List[str]:
+    kept: List[str] = []
+    for f in features:
+        accept = True
+        xf = X[f]
+        for k in kept:
+            s = pd.concat([xf, X[k]], axis=1).dropna()
+            if len(s) < 3:
+                continue
+            if abs(float(s.iloc[:, 0].corr(s.iloc[:, 1]))) >= tau:
+                accept = False
+                break
+        if accept:
+            kept.append(f)
+    return kept
 
-# ---------- SIS (Fan & Lv, 2008) ----------
+def _enforce_min_max(selected: List[str], ranked: Iterable[str], min_features: int, max_features: int) -> List[str]:
+    s = list(selected)
+    if len(s) < min_features:
+        for r in ranked:
+            if r not in s:
+                s.append(r)
+                if len(s) >= min_features:
+                    break
+    if max_features > 0:
+        s = s[:max_features]
+    return s
 
-def sis_select(X: pd.DataFrame, y: pd.Series, *,
-               tau: float = 0.0, top_n: int = 0,
-               min_features: int = 0, max_features: int = 0,
-               dedup_tau: float = 0.98) -> List[str]:
-    """
-    Rank by absolute Pearson correlation on masked rows.
-    """
-    # correlations
-    yy = y.values
+def _hac_lags_auto(n: int) -> int:
+    if n <= 0:
+        return 1
+    lag = int(np.floor(4.0 * (n / 100.0) ** (2.0 / 9.0)))
+    return max(lag, 1)
+
+# ---------- aggregation helper ----------
+import json
+from pathlib import Path
+
+def _aggregate_monthly_to_quarterly_matrix(
+    X: pd.DataFrame,
+    y: pd.Series,
+    rule_default: str | None,
+    rule_map_path: str | None,
+) -> pd.DataFrame:
+    # Precompute
+    sum3 = X.rolling(3).sum().shift(1)
+    mean3 = X.rolling(3).mean().shift(1)
+    last1 = X.shift(1)
+
+    if rule_map_path:
+        rules = json.loads(Path(rule_map_path).read_text(encoding="utf-8")).get("series_rules", {})
+        cols = []
+        for c in X.columns:
+            rule = str(rules.get(c, {}).get("rule", rule_default or "mean3m")).lower()
+            if rule == "sum3m":
+                cols.append(sum3[c])
+            elif rule == "last":
+                cols.append(last1[c])
+            else:
+                cols.append(mean3[c])
+        Xq = pd.concat(cols, axis=1)
+        Xq.columns = X.columns
+        return Xq
+
+    rule = (rule_default or "mean3m").lower()
+    if rule == "sum3m":
+        return sum3
+    if rule == "last":
+        return last1
+    return mean3
+
+# ---------- SIS ----------
+def sis_select(
+    X: pd.DataFrame,
+    y: pd.Series,
+    *,
+    min_features: int,
+    max_features: int,
+    dedup_tau: float,
+    sis_tau: float = 0.0,
+    sis_topn: int = 0,
+) -> List[str]:
+    X, y = _align_dropna(X, y)
+    corr = _rank_features_by_abs_corr(X, y)
+    ranked = list(corr.index)
+    if sis_tau > 0:
+        ranked = [c for c in ranked if corr[c] >= sis_tau]
+    if sis_topn and sis_topn > 0:
+        ranked = ranked[:sis_topn]
+    dedup = _dedup_by_corr(ranked, X, tau=dedup_tau)
+    selected = _enforce_min_max(dedup, ranked, min_features, max_features)
+    return selected
+
+# ---------- t-stat (+ AR(y) + optional aggregation + optional ADL block) ----------
+def _fit_ols_and_stats(yv: np.ndarray, Xv: np.ndarray, hac_lags: Optional[int]):
+    if sm is None:
+        # Plain OLS (no HAC), with simple t-stats via last coefficient; F requires statsmodels
+        Xd = np.column_stack([np.ones(len(yv)), Xv])
+        beta = np.linalg.lstsq(Xd, yv, rcond=None)[0]
+        resid = yv - Xd @ beta
+        p = Xd.shape[1]
+        s2 = (resid @ resid) / max(len(yv) - p, 1)
+        cov = s2 * np.linalg.inv(Xd.T @ Xd)
+        tvals = beta / np.sqrt(np.maximum(np.diag(cov), 1e-12))
+        return beta, resid, cov, tvals, None  # no model object
+    Xd = sm.add_constant(Xv, has_constant="add")
+    mod = sm.OLS(yv, Xd, missing="drop")
+    res = mod.fit() if hac_lags is None else mod.fit(cov_type="HAC", cov_kwds={"maxlags": int(hac_lags)})
+    return res.params, res.resid, res.cov_params(), res.tvalues, res
+
+def tstat_select(
+    X: pd.DataFrame,
+    y: pd.Series,
+    *,
+    min_features: int,
+    max_features: int,
+    dedup_tau: float,
+    tstat_alpha: float = 0.05,
+    tstat_topn: int = 0,
+    hac_lags: str | int = "auto",
+    ar_lags: int = 0,
+    agg_rule_map: str | None = None,
+    agg_rule_default: str | None = None,
+    # NEW:
+    x_adl_lags: int = 0,
+    adl_score: str = "fstat",  # "fstat" or "max_t"
+) -> List[str]:
+    # Align + (optional) aggregate
+    X, y = _align_dropna(X, y)
+    if agg_rule_map or agg_rule_default:
+        X_aggr = _aggregate_monthly_to_quarterly_matrix(X, y, agg_rule_default, agg_rule_map)
+        X, y = _align_dropna(X_aggr, y)
+
+    n = int(y.notna().sum())
+
+    # HAC lags
+    if isinstance(hac_lags, str):
+        hac = _hac_lags_auto(n) if hac_lags.lower() == "auto" else None
+    else:
+        hac = int(hac_lags)
+
+    # AR(y)
+    ylags: List[pd.Series] = []
+    if ar_lags and ar_lags > 0:
+        for k in range(1, int(ar_lags) + 1):
+            ylags.append(y.shift(k))
+
     scores: Dict[str, float] = {}
+    pvals: Dict[str, float] = {}
+
+    # For dedup later, correlations use the base X (no lags) on the aligned quarterly grid.
+    X_base = X.copy()
+
     for c in X.columns:
-        x = X[c].values
-        m = np.isfinite(x) & np.isfinite(yy)
-        if m.sum() < 10:
-            scores[c] = 0.0
+        # Build regressors: AR(y) + X block
+        block_cols: List[pd.Series] = []
+
+        # Base series for X_j is already the chosen timing (raw, last, mean3m/sum3m via aggregation above)
+        x0 = X[c]
+        block_cols.append(x0)
+
+        # Add K short lags of the *same base-timed* series.
+        # NOTE: Since (X,y) are on quarter-start rows after alignment, shift(1) = one quarter lag.
+        K = int(max(x_adl_lags, 0))
+        if K > 0:
+            for k in range(1, K + 1):
+                block_cols.append(x0.shift(k))
+
+        # Assemble design
+        Z = pd.concat([y] + ylags + block_cols, axis=1).dropna()
+        if len(Z) < max(8, 2 + len(ylags) + len(block_cols)):
+            scores[c] = np.nan
+            pvals[c] = np.nan
             continue
-        xm = x[m] - x[m].mean(); ym = yy[m] - np.nanmean(yy[m])
-        denom = float(np.sqrt((xm * xm).sum()) * np.sqrt((ym * ym).sum()))
-        scores[c] = 0.0 if denom == 0.0 else float((xm @ ym) / denom)
 
-    s = pd.Series(scores).abs().sort_values(ascending=False)
+        yv = Z.iloc[:, 0].values
+        Xv = Z.iloc[:, 1:].values
 
-    sel = s.index.tolist()
-    if tau and tau > 0:
-        sel = s[s >= tau].index.tolist()
-    if top_n and top_n > 0 and len(sel) > top_n:
-        sel = sel[:top_n]
+        params, resid, cov, tvalues, res = _fit_ols_and_stats(yv, Xv, hac)
 
-    # dedup + guardrails
-    cols = dedup_by_corr(X, sel, dedup_tau)
+        p_const = 1  # constant
+        p_y = len(ylags)
+        p_blk = len(block_cols)
+        p_total = p_const + p_y + p_blk
 
-    # top-up to min_features by following ranking
-    if min_features and len(cols) < min_features:
-        for c in s.index:
-            if c in cols:
-                continue
-            cols.append(c)
-            cols = dedup_by_corr(X, cols, dedup_tau)
-            if len(cols) >= min_features:
-                break
+        # Index of block coefficients within parameter vector:
+        # order is [const] + ylags + block_cols
+        blk_start = 1 + p_y
+        blk_end = blk_start + p_blk  # exclusive
 
-    if max_features and len(cols) > max_features:
-        cols = cols[:max_features]
-    return cols
+        if p_blk == 1:
+            # Classic single-regressor: use t on the feature
+            t_last = float(abs(tvalues[blk_end - 1]))
+            # p-value only available if statsmodels; approximated otherwise as NaN
+            p_last = float(getattr(res, "pvalues", [np.nan]*p_total)[blk_end - 1]) if res is not None else np.nan
+            scores[c] = t_last if adl_score == "max_t" else t_last  # same in single-var case
+            pvals[c] = p_last if tstat_alpha > 0 else np.nan
+        else:
+            # Block case: either F-test or max |t|
+            if adl_score == "fstat" and res is not None:
+                # Wald F-test for joint significance of the block
+                R = np.zeros((p_blk, p_total))
+                for i in range(p_blk):
+                    R[i, blk_start + i] = 1.0
+                ftest = res.f_test(R)
+                fval = float(np.asarray(ftest.fvalue).ravel()[0])
+                pval = float(np.asarray(ftest.pvalue).ravel()[0])
+                scores[c] = fval
+                pvals[c] = pval if tstat_alpha > 0 else np.nan
+            else:
+                # Rank by max |t| in the block; gate by min p in the block (if available)
+                t_block = np.asarray(tvalues[blk_start:blk_end], dtype=float)
+                scores[c] = float(np.nanmax(np.abs(t_block)))
+                if res is not None and tstat_alpha > 0:
+                    p_block = np.asarray(res.pvalues[blk_start:blk_end], dtype=float)
+                    pvals[c] = float(np.nanmin(p_block))
+                else:
+                    pvals[c] = np.nan
 
+    # Ranking & gating
+    s = pd.Series(scores, dtype="float64").dropna().sort_values(ascending=False)
+    ranked_all = list(s.index)
 
-# ---------- t-stat–based (Bair et al., 2006 style) ----------
+    if tstat_alpha and np.isfinite(tstat_alpha) and tstat_alpha > 0:
+        keep = [c for c in ranked_all if np.isfinite(pvals.get(c, np.nan)) and pvals[c] < tstat_alpha]
+    else:
+        keep = ranked_all
 
-def _t_stat_univariate(x: np.ndarray, y: np.ndarray) -> float:
-    m = np.isfinite(x) & np.isfinite(y)
-    n = int(m.sum())
-    if n < 10:
-        return 0.0
-    x = x[m]; y = y[m]
-    xx = float(x.T @ x)
-    if xx <= 0:
-        return 0.0
-    beta = float((x.T @ y) / xx)
-    resid = y - beta * x
-    s2 = float((resid @ resid) / max(1, n - 1))
-    se = (s2 / xx) ** 0.5
-    if se == 0:
-        return 0.0
-    return beta / se
+    if tstat_topn and tstat_topn > 0:
+        keep = keep[:tstat_topn]
 
-def tstat_select(X: pd.DataFrame, y: pd.Series, *,
-                 alpha: float = 0.0, top_n: int = 0,
-                 min_features: int = 0, max_features: int = 0,
-                 dedup_tau: float = 0.98) -> List[str]:
-    """
-    Rank by |t-stat| of y ~ x (univariate) on masked rows. Optional p-value screen via normal approx.
-    """
-    yy = y.values
-    stats: Dict[str, Tuple[float, float]] = {}  # var -> (|t|, p)
-    for c in X.columns:
-        t = abs(_t_stat_univariate(X[c].values, yy))
-        # Normal approximation p-value
-        from math import erf, sqrt
-        z = float(t)
-        p = 2 * (1 - 0.5 * (1 + erf(z / sqrt(2))))
-        stats[c] = (t, p)
+    # Dedup on the base (non-lagged) X
+    dedup = _dedup_by_corr(keep, X_base, tau=dedup_tau)
+    selected = _enforce_min_max(dedup, ranked_all, min_features, max_features)
+    return selected
 
-    T = (pd.DataFrame(stats, index=["abs_t", "p"]).T
-           .sort_values("abs_t", ascending=False))
-
-    sel = T.index.tolist()
-    if alpha and alpha > 0:
-        sel = T[T["p"] <= alpha].index.tolist()
-    if top_n and top_n > 0 and len(sel) > top_n:
-        sel = sel[:top_n]
-
-    cols = dedup_by_corr(X, sel, dedup_tau)
-
-    if min_features and len(cols) < min_features:
-        for c in T.index:
-            if c in cols:
-                continue
-            cols.append(c)
-            cols = dedup_by_corr(X, cols, dedup_tau)
-            if len(cols) >= min_features:
-                break
-
-    if max_features and len(cols) > max_features:
-        cols = cols[:max_features]
-    return cols
-
-
-# ---------- LARS / Lasso (Efron et al., 2004) ----------
-
-def lars_select(X: pd.DataFrame, y: pd.Series, *,
-                cv: int = 10,
-                min_features: int = 0, max_features: int = 0,
-                dedup_tau: float = 0.98) -> List[str]:
-    """
-    LassoLarsCV with fit_intercept=False (data already standardized).
-    Support = non-zero coefficients at CV-chosen alpha.
-    Guardrails: de-dup; optional top-up by |corr(y)| if min_features>0; cap at max_features.
-    """
-    model = LassoLarsCV(cv=int(cv), fit_intercept=False).fit(X.values, y.values)
-    coef = model.coef_
-    cols_all = X.columns.to_list()
-    cols = [cols_all[i] for i, b in enumerate(coef) if float(b) != 0.0]
-
-    # de-dup
-    cols = dedup_by_corr(X, cols, dedup_tau)
-
-    # top-up if requested using |corr(y)|
-    if min_features and len(cols) < min_features:
-        rank = X.apply(lambda s: s.corr(y), axis=0).abs().sort_values(ascending=False)
-        for c in rank.index:
-            if c in cols:
-                continue
-            cols.append(c)
-            cols = dedup_by_corr(X, cols, dedup_tau)
-            if len(cols) >= min_features:
-                break
-
-    if max_features and len(cols) > max_features:
-        cols = cols[:max_features]
-    return cols
-
-
-# ---------- Public wrappers (used by the CLI scripts) ----------
-
-def _finalize(panel: str, tag: str, method: str, params: Dict,
-              X_full: pd.DataFrame, cols: List[str]) -> None:
-    meta = write_selected_meta(panel, tag, method, params, cols)
-    outp = write_preselected_panel(panel, tag, method, X_full, cols)
-    print(f"{panel} {tag} {method}: selected {len(cols)} vars; meta={meta}; panel={outp}")
-
-def run_sis(panel: str, tag: str, *,
-            tau: float = 0.0, top_n: int = 0,
-            min_features: int = 0, max_features: int = 0,
-            dedup_tau: float = 0.98) -> List[str]:
-    X, y = load_X_y(panel, tag)
-    m = mask_train_rows(y)
-    Xs, ys = X.loc[m], y.loc[m]
-    cols = sis_select(Xs, ys, tau=tau, top_n=top_n,
-                      min_features=min_features, max_features=max_features,
-                      dedup_tau=dedup_tau)
-    _finalize(panel, tag, "sis",
-              {"tau_sis": tau, "top_n": top_n,
-               "min_features": min_features, "max_features": max_features,
-               "dedup_tau": dedup_tau},
-              X, cols)
-    return cols
-
-def run_tstat(panel: str, tag: str, *,
-              alpha: float = 0.0, top_n: int = 0,
-              min_features: int = 0, max_features: int = 0,
-              dedup_tau: float = 0.98) -> List[str]:
-    X, y = load_X_y(panel, tag)
-    m = mask_train_rows(y)
-    Xs, ys = X.loc[m], y.loc[m]
-    cols = tstat_select(Xs, ys, alpha=alpha, top_n=top_n,
-                        min_features=min_features, max_features=max_features,
-                        dedup_tau=dedup_tau)
-    _finalize(panel, tag, "tstat",
-              {"alpha_t": alpha, "top_n": top_n,
-               "min_features": min_features, "max_features": max_features,
-               "dedup_tau": dedup_tau},
-              X, cols)
-    return cols
-
-def run_lars(panel: str, tag: str, *,
-             cv: int = 10,
-             min_features: int = 0, max_features: int = 0,
-             dedup_tau: float = 0.98) -> List[str]:
-    X, y = load_X_y(panel, tag)
-    m = mask_train_rows(y)
-    Xs, ys = X.loc[m], y.loc[m]
-    cols = lars_select(Xs, ys, cv=cv,
-                       min_features=min_features, max_features=max_features,
-                       dedup_tau=dedup_tau)
-    _finalize(panel, tag, "lars",
-              {"cv": int(cv),
-               "min_features": min_features, "max_features": max_features,
-               "dedup_tau": dedup_tau},
-              X, cols)
-    return cols
+# ---------- LARS ----------
+def lars_select(
+    X: pd.DataFrame,
+    y: pd.Series,
+    *,
+    min_features: int,
+    max_features: int,
+    dedup_tau: float,
+    cv: int = 10,
+) -> List[str]:
+    if LassoLarsCV is None or TimeSeriesSplit is None:
+        raise RuntimeError("scikit-learn is required for LARS selection")
+    X, y = _align_dropna(X, y)
+    Z = pd.concat([y, X], axis=1).dropna()
+    yv = Z.iloc[:, 0].values
+    Xv = Z.iloc[:, 1:].values
+    cols = list(X.columns)
+    if len(cols) == 0:
+        return []
+    tscv = TimeSeriesSplit(n_splits=int(cv))
+    model = cast("LassoLarsCV", LassoLarsCV(cv=tscv).fit(Xv, yv))  # type: ignore[call-arg]
+    coef = getattr(model, "coef_", None)
+    if coef is None:
+        return []
+    nz = np.where(np.abs(coef) > 1e-12)[0]
+    selected_raw = [cols[i] for i in nz]
+    selected_dedup = _dedup_by_corr(selected_raw, X, tau=dedup_tau)
+    corr = _rank_features_by_abs_corr(X, y)
+    ranked = list(corr.index)
+    selected = _enforce_min_max(selected_dedup, ranked, min_features, max_features)
+    return selected
