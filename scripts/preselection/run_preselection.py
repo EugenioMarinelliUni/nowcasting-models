@@ -1,141 +1,246 @@
 #!/usr/bin/env python3
-"""
-Run variable preselection (SIS / t-stat / LARS) for a single {panel, tag} specified
-via a backtest config JSON.
-
-Expected inputs (created earlier in your pipeline):
-  dataset/{panel}/baseline/X_panel_z__{panel}__{tag}.csv
-  dataset/{panel}/baseline/y_target_z__{panel}__{tag}.csv
-
-Outputs (per method):
-  data/metadata/variants/{panel}__{tag}__preselect_{METHOD}.json
-  dataset/{panel}/preselect/{method}/X_panel_z__{panel}__{tag}__preselect-{method}.csv
-"""
 from __future__ import annotations
 
 import argparse
 import json
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, List, Tuple, Any
 
 import pandas as pd
 
-# Core logic lives in src/dfm_pipeline/preselection/selectors.py
-from dfm_pipeline.preselection.selectors import (
-    run_sis,
-    run_tstat,
-    run_lars,
-)
+# --- project imports (post-refactor) ---
+try:
+    from dfm_pipeline.preselection.baseline_screening import selectors as _selectors
+except ModuleNotFoundError:
+    from dfm_pipeline.preselection import selectors as _selectors  # type: ignore[assignment]
+
+from dfm_pipeline.preselection.io import load_X_y
 
 
-def _read_cfg(cfg_path: Path) -> Dict[str, Any]:
-    if not cfg_path.exists():
-        raise FileNotFoundError(f"Config not found: {cfg_path}")
-    try:
-        return json.loads(cfg_path.read_text(encoding="utf-8"))
-    except Exception as e:
-        raise ValueError(f"Failed to parse JSON in {cfg_path}: {e}") from e
+# --------------------------
+# helpers for outputs
+# --------------------------
+def _meta_and_out_paths(panel: str, tag: str, method: str, label: str | None) -> Tuple[Path, Path]:
+    suffix = f"__{label}" if label else ""
+    meta = Path(f"data/metadata/variants/{panel}__{tag}__preselect_{method}{suffix}.json")
+    out_dir = Path(f"dataset/{panel}/preselect/{method}")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / f"X_panel_z__{panel}__{tag}__preselect-{method}{suffix}.csv"
+    return meta, out
 
 
-def _make_tag(cfg: Dict[str, Any]) -> str:
-    ts = cfg["time_spans"]["train"]["start"]
-    te = cfg["time_spans"]["train"]["end"]
-    return f"train{ts[:4]}_{te[:4]}"
+def _write_outputs(
+    panel: str,
+    tag: str,
+    method: str,
+    selected: List[str],
+    X_full: pd.DataFrame,
+    params: Dict,
+    *,
+    label: str | None,
+) -> None:
+    meta_p, out_p = _meta_and_out_paths(panel, tag, method, label)
+
+    payload = {
+        "method": method,
+        "panel_id": panel,
+        "train_tag": tag,
+        "params": params,
+        "selected": selected,
+    }
+    meta_p.parent.mkdir(parents=True, exist_ok=True)
+    meta_p.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    # Guard: only save columns that still exist in X_full (defensive)
+    keep = [c for c in selected if c in X_full.columns]
+    X_full.loc[:, keep].to_csv(out_p, index_label="Date")
 
 
-def _print_brief_header(panel: str, tag: str, cfg_path: Path) -> None:
-    print(f"[preselection] panel={panel}  tag={tag}  cfg={cfg_path}")
+def _mask_to_quarter_stamps(X: pd.DataFrame, y: pd.Series) -> Tuple[pd.DataFrame, pd.Series]:
+    """
+    Keep rows where y is observed (quarter-start stamps in your setup).
+    """
+    if not X.index.equals(y.index):
+        raise ValueError("Index mismatch between X and y. Make sure both share the same monthly index.")
+    m = y.notna()
+    return X.loc[m], y.loc[m]
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(
-        description="Run SIS / t-stat / LARS preselection for one {panel, tag}."
-    )
-    ap.add_argument("--cfg", required=True, help="Backtest config JSON (with panel_id and train span)")
+# --------------------------
+# main runner
+# --------------------------
+def run_for_one(
+    panel: str,
+    tag: str,
+    method: str,
+    *,
+    min_features: int,
+    max_features: int,
+    dedup_tau: float,
+    # SIS
+    sis_tau: float,
+    sis_topn: int,
+    # t-stat
+    tstat_alpha: float,
+    tstat_topn: int,
+    tstat_ar_lags: int,
+    hac_lags: str | int,
+    agg_rule_map: str | None,
+    agg_rule_default: str | None,
+    x_adl_lags: int,
+    adl_score: str,
+    # LARS
+    cv: int,
+    # labeling
+    label: str | None,
+) -> List[str]:
+    # Load standardized training data. Tolerate both (X, y) and (X, y, meta).
+    res: Any = load_X_y(panel, tag)
+    if not (isinstance(res, tuple) and len(res) >= 2):
+        raise ValueError("load_X_y(panel, tag) must return at least (X, y).")
+    X: pd.DataFrame = res[0]
+    y: pd.Series = res[1]
+
+    # Restrict to quarter stamps (where y is observed)
+    Xs, ys = _mask_to_quarter_stamps(X, y)
+
+    # Choose method
+    if method == "sis":
+        cols = _selectors.sis_select(
+            Xs,
+            ys,
+            min_features=min_features,
+            max_features=max_features,
+            dedup_tau=dedup_tau,
+            sis_tau=sis_tau,
+            sis_topn=sis_topn,
+        )
+    elif method == "tstat":
+        cols = _selectors.tstat_select(
+            Xs,
+            ys,
+            min_features=min_features,
+            max_features=max_features,
+            dedup_tau=dedup_tau,
+            tstat_alpha=tstat_alpha,
+            tstat_topn=tstat_topn,
+            hac_lags=hac_lags,          # "auto" or int
+            ar_lags=tstat_ar_lags,      # 0 or 4 typical
+            agg_rule_map=agg_rule_map,  # per-series JSON or None
+            agg_rule_default=agg_rule_default,  # "sum3m" | "mean3m" | "last" or None
+            x_adl_lags=x_adl_lags,      # 0 = off, 1 = ADL(1)
+            adl_score=adl_score,        # "fstat" | "max_t"
+        )
+    elif method == "lars":
+        cols = _selectors.lars_select(
+            Xs,
+            ys,
+            min_features=min_features,
+            max_features=max_features,
+            dedup_tau=dedup_tau,
+            cv=cv,
+        )
+    else:
+        raise ValueError("method must be one of {'sis','tstat','lars'}")
+
+    # Persist artifacts
+    params = {
+        "min_features": int(min_features),
+        "max_features": int(max_features),
+        "dedup_tau": float(dedup_tau),
+        "sis_tau": float(sis_tau),
+        "sis_topn": int(sis_topn),
+        "tstat_alpha": float(tstat_alpha),
+        "tstat_topn": int(tstat_topn),
+        "tstat_ar_lags": int(tstat_ar_lags),
+        "hac_lags": hac_lags,
+        "agg_rule_map": agg_rule_map,
+        "agg_rule_default": agg_rule_default,
+        "x_adl_lags": int(x_adl_lags),
+        "adl_score": adl_score,
+        "cv": int(cv),
+        "label": label,
+    }
+    _write_outputs(panel, tag, method, cols, X, params, label=label)
+
+    print(f"{panel} {tag} {method}: selected {len(cols)} vars (label={label or '-'})")
+    return cols
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Baseline variable preselection (SIS / t-stat / LARS).")
+    ap.add_argument("--panel", required=True, help="Panel id, e.g., 1960_noVIX or 1965_withVIX")
+    ap.add_argument("--tag", required=True, help="Training tag, e.g., train1960_2015")
     ap.add_argument("--method", choices=["sis", "tstat", "lars", "all"], default="all")
 
-    # Common guardrails
+    # Global guardrails
     ap.add_argument("--min_features", type=int, default=30)
     ap.add_argument("--max_features", type=int, default=80)
     ap.add_argument("--dedup_tau", type=float, default=0.98)
 
     # SIS knobs
-    ap.add_argument("--sis_tau", type=float, default=0.0, help="Abs(corr) threshold; 0 means no threshold")
-    ap.add_argument("--sis_topn", type=int, default=0, help="Cap; 0 means no cap")
+    ap.add_argument("--sis_tau", type=float, default=0.0)
+    ap.add_argument("--sis_topn", type=int, default=0)
 
     # t-stat knobs
-    ap.add_argument("--tstat_alpha", type=float, default=0.0, help="Two-sided p-value filter; 0=no filter")
-    ap.add_argument("--tstat_topn", type=int, default=0, help="Cap; 0 means no cap")
+    ap.add_argument("--tstat_alpha", type=float, default=0.0)
+    ap.add_argument("--tstat_topn", type=int, default=0)
+    ap.add_argument("--tstat_ar_lags", type=int, default=0,
+                    help="AR lags of y to include in t-stat regressions (0 = none, 4 = AR(4)).")
+    ap.add_argument("--hac_lags", default="auto",
+                    help='Newey–West HAC lags for t-stat ("auto" or integer).')
 
-    # LARS knobs
-    ap.add_argument("--cv", type=int, default=10, help="K-fold CV for LassoLarsCV")
+    # Aggregation controls (for t-stat)
+    ap.add_argument("--agg_rule_map", type=str, default=None,
+                    help="Path to per-series aggregation rules JSON (sum3m/mean3m/last per column).")
+    ap.add_argument("--agg_rule_default", type=str, default=None,
+                    choices=["sum3m", "mean3m", "last"],
+                    help="Apply one aggregation rule to all series if no map is provided.")
 
-    # Kept for backward CLI parity (selectors already write outputs when they run)
-    ap.add_argument("--write_panel", action="store_true", help="(No-op; outputs are written by default)")
+    # ADL controls (for t-stat)
+    ap.add_argument("--x_adl_lags", type=int, default=0,
+                    help="Number of short lags of each X to include as a block (0 = off).")
+    ap.add_argument("--adl_score", type=str, default="fstat", choices=["fstat", "max_t"],
+                    help="Scoring for ADL block: 'fstat' (joint F) or 'max_t' among block coefficients.")
+
+    # LARS knob
+    ap.add_argument("--cv", type=int, default=10, help="CV folds for LARS (LassoLarsCV)")
+
+    # Labeling
+    ap.add_argument("--label", type=str, default=None,
+                    help="Suffix to append to output filenames for this run.")
 
     args = ap.parse_args()
 
-    cfg_path = Path(args.cfg)
-    cfg = _read_cfg(cfg_path)
-    panel = cfg["panel_id"]
-    tag = _make_tag(cfg)
-
-    _print_brief_header(panel, tag, cfg_path)
-
-    # Optional quick existence sanity before calling selectors (nice UX)
-    x_path = Path(f"dataset/{panel}/baseline/X_panel_z__{panel}__{tag}.csv")
-    y_path = Path(f"dataset/{panel}/baseline/y_target_z__{panel}__{tag}.csv")
-    for p in (x_path, y_path):
-        if not p.exists():
-            raise FileNotFoundError(f"Required file missing: {p}")
-
-    # Light index-alignment sanity (fail fast with a clear error)
-    try:
-        X = pd.read_csv(x_path, parse_dates=["Date"]).set_index("Date").sort_index()
-        y = pd.read_csv(y_path, parse_dates=["Date"]).set_index("Date").sort_index().iloc[:, 0]
-        if not X.index.equals(y.index):
-            raise ValueError("X and y indices differ. Make sure both are aligned on the same monthly index.")
-        if y.notna().sum() == 0:
-            raise ValueError("No non-NaN target values in the train index; cannot run preselection.")
-    except Exception as e:
-        raise RuntimeError(f"Sanity check failed for {panel} {tag}: {e}") from e
-
-    common_kwargs = dict(
-        min_features=int(args.min_features),
-        max_features=int(args.max_features),
-        dedup_tau=float(args.dedup_tau),
-    )
-
-    # Run the requested method(s)
-    if args.method in ("sis", "all"):
-        print("[SIS] running…")
-        run_sis(
-            panel,
-            tag,
-            tau=float(args.sis_tau),
-            top_n=int(args.sis_topn),
-            **common_kwargs,
-        )
-    if args.method in ("tstat", "all"):
-        print("[t-stat] running…")
-        run_tstat(
-            panel,
-            tag,
-            alpha=float(args.tstat_alpha),
-            top_n=int(args.tstat_topn),
-            **common_kwargs,
-        )
-    if args.method in ("lars", "all"):
-        print("[LARS] running…")
-        run_lars(
-            panel,
-            tag,
-            cv=int(args.cv),
-            **common_kwargs,
-        )
-
-    print("[preselection] done.")
+    methods = ["sis", "tstat", "lars"] if args.method == "all" else [args.method]
+    for m in methods:
+        try:
+            run_for_one(
+                args.panel,
+                args.tag,
+                m,
+                min_features=args.min_features,
+                max_features=args.max_features,
+                dedup_tau=args.dedup_tau,
+                sis_tau=args.sis_tau,
+                sis_topn=args.sis_topn,
+                tstat_alpha=args.tstat_alpha,
+                tstat_topn=args.tstat_topn,
+                tstat_ar_lags=args.tstat_ar_lags,
+                hac_lags=args.hac_lags,
+                agg_rule_map=args.agg_rule_map,
+                agg_rule_default=args.agg_rule_default,
+                x_adl_lags=args.x_adl_lags,
+                adl_score=args.adl_score,
+                cv=args.cv,
+                label=args.label,
+            )
+        except Exception as e:
+            print(f"[ERROR] {args.panel} {args.tag} {m}: {e}")
+            raise
 
 
 if __name__ == "__main__":
+    # import sys
+    # sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
     main()
