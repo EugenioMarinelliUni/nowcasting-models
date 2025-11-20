@@ -1,0 +1,9 @@
+{
+  "panels": {
+    "1960_noVIX": "data/processed_data/stationarity/panel_start_1960_drop_late_fixhousing_delta.csv",
+    "1965_withVIX": "data/processed_data/stationarity/panel_start_1965_keep_late_fixhousing_delta.csv"
+  },
+  "targets": {
+    "gdp_A191RL1Q225SBEA": "data/raw_data/targets/gdp/A191RL1Q225SBEA_latest.csv"
+  }
+}
