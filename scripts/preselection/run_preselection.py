@@ -3,244 +3,564 @@ from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Dict, List, Tuple, Any
+from typing import Any, Dict, List, Tuple, overload, Union, cast
 
 import pandas as pd
 
-# --- project imports (post-refactor) ---
-try:
-    from dfm_pipeline.preselection.baseline_screening import selectors as _selectors
-except ModuleNotFoundError:
-    from dfm_pipeline.preselection import selectors as _selectors  # type: ignore[assignment]
-
-from dfm_pipeline.preselection.io import load_X_y
+from src.dfm_pipeline.preselection.preselect_sis import run_sis_preselection
+from src.dfm_pipeline.preselection.preselect_tstat import run_tstat_preselection
+from src.dfm_pipeline.preselection.preselect_lars import run_lars_tscv_preselection
 
 
-# --------------------------
-# helpers for outputs
-# --------------------------
-def _meta_and_out_paths(panel: str, tag: str, method: str, label: str | None) -> Tuple[Path, Path]:
-    suffix = f"__{label}" if label else ""
-    meta = Path(f"data/metadata/variants/{panel}__{tag}__preselect_{method}{suffix}.json")
-    out_dir = Path(f"dataset/{panel}/preselect/{method}")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out = out_dir / f"X_panel_z__{panel}__{tag}__preselect-{method}{suffix}.csv"
-    return meta, out
+# ---------------------------------------------------------------------
+# Dataclasses and small helpers
+# ---------------------------------------------------------------------
 
 
-def _write_outputs(
-    panel: str,
-    tag: str,
-    method: str,
-    selected: List[str],
-    X_full: pd.DataFrame,
-    params: Dict,
-    *,
-    label: str | None,
-) -> None:
-    meta_p, out_p = _meta_and_out_paths(panel, tag, method, label)
-
-    payload = {
-        "method": method,
-        "panel_id": panel,
-        "train_tag": tag,
-        "params": params,
-        "selected": selected,
-    }
-    meta_p.parent.mkdir(parents=True, exist_ok=True)
-    meta_p.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-
-    # Guard: only save columns that still exist in X_full (defensive)
-    keep = [c for c in selected if c in X_full.columns]
-    X_full.loc[:, keep].to_csv(out_p, index_label="Date")
+@dataclass
+class PreselectionInfo:
+    panel_name: str
+    method: str
+    variant_name: str
+    train_start: str
+    train_end: str
+    agg_mode: str
+    agg_rule_path: str | None
+    agg_default_rule: str | None
+    n_obs: int
+    n_features_in: int
+    n_features_selected: int
+    method_kwargs: Dict[str, Any]
 
 
-def _mask_to_quarter_stamps(X: pd.DataFrame, y: pd.Series) -> Tuple[pd.DataFrame, pd.Series]:
+def ensure_dir(p: Path) -> None:
+    p.mkdir(parents=True, exist_ok=True)
+
+
+def fmt_span_full(start: str, end: str) -> str:
+    s = pd.to_datetime(start)
+    e = pd.to_datetime(end)
+    # YYYY_MM_DD_YYYY_MM_DD
+    return (
+        f"{s.year:04d}_{s.month:02d}_{s.day:02d}_"
+        f"{e.year:04d}_{e.month:02d}_{e.day:02d}"
+    )
+
+
+@overload
+def clip_window(df: pd.DataFrame, start: str, end: str) -> pd.DataFrame: ...
+@overload
+def clip_window(df: pd.Series, start: str, end: str) -> pd.Series: ...
+
+
+def clip_window(df: Union[pd.DataFrame, pd.Series], start: str, end: str):
     """
-    Keep rows where y is observed (quarter-start stamps in your setup).
+    Restrict DataFrame/Series to [start, end] on the index.
+
+    Overloads let the type-checker infer the correct return type
+    (DataFrame vs Series) based on the input.
     """
-    if not X.index.equals(y.index):
-        raise ValueError("Index mismatch between X and y. Make sure both share the same monthly index.")
-    m = y.notna()
-    return X.loc[m], y.loc[m]
+    start_ts = pd.to_datetime(start)
+    end_ts = pd.to_datetime(end)
+    return df.loc[(df.index >= start_ts) & (df.index <= end_ts)]
 
 
-# --------------------------
-# main runner
-# --------------------------
-def run_for_one(
-    panel: str,
-    tag: str,
-    method: str,
-    *,
-    min_features: int,
-    max_features: int,
-    dedup_tau: float,
-    # SIS
-    sis_tau: float,
-    sis_topn: int,
-    # t-stat
-    tstat_alpha: float,
-    tstat_topn: int,
-    tstat_ar_lags: int,
-    hac_lags: str | int,
-    agg_rule_map: str | None,
-    agg_rule_default: str | None,
-    x_adl_lags: int,
-    adl_score: str,
-    # LARS
-    cv: int,
-    # labeling
-    label: str | None,
-) -> List[str]:
-    # Load standardized training data. Tolerate both (X, y) and (X, y, meta).
-    res: Any = load_X_y(panel, tag)
-    if not (isinstance(res, tuple) and len(res) >= 2):
-        raise ValueError("load_X_y(panel, tag) must return at least (X, y).")
-    X: pd.DataFrame = res[0]
-    y: pd.Series = res[1]
+def load_panel(panel_csv: str) -> pd.DataFrame:
+    df = pd.read_csv(panel_csv)
+    first = df.columns[0]
+    df[first] = pd.to_datetime(df[first])
+    df = df.set_index(first).sort_index()
+    return df
 
-    # Restrict to quarter stamps (where y is observed)
-    Xs, ys = _mask_to_quarter_stamps(X, y)
 
-    # Choose method
-    if method == "sis":
-        cols = _selectors.sis_select(
-            Xs,
-            ys,
-            min_features=min_features,
-            max_features=max_features,
-            dedup_tau=dedup_tau,
-            sis_tau=sis_tau,
-            sis_topn=sis_topn,
-        )
-    elif method == "tstat":
-        cols = _selectors.tstat_select(
-            Xs,
-            ys,
-            min_features=min_features,
-            max_features=max_features,
-            dedup_tau=dedup_tau,
-            tstat_alpha=tstat_alpha,
-            tstat_topn=tstat_topn,
-            hac_lags=hac_lags,          # "auto" or int
-            ar_lags=tstat_ar_lags,      # 0 or 4 typical
-            agg_rule_map=agg_rule_map,  # per-series JSON or None
-            agg_rule_default=agg_rule_default,  # "sum3m" | "mean3m" | "last" or None
-            x_adl_lags=x_adl_lags,      # 0 = off, 1 = ADL(1)
-            adl_score=adl_score,        # "fstat" | "max_t"
-        )
-    elif method == "lars":
-        cols = _selectors.lars_select(
-            Xs,
-            ys,
-            min_features=min_features,
-            max_features=max_features,
-            dedup_tau=dedup_tau,
-            cv=cv,
-        )
+def load_target(target_csv: str) -> pd.Series:
+    df = pd.read_csv(target_csv)
+    first = df.columns[0]
+    df[first] = pd.to_datetime(df[first])
+    df = df.set_index(first).sort_index()
+    ycols = [c for c in df.columns if c.lower() not in ("date", "time", "timestamp")]
+    if not ycols:
+        raise ValueError("Target CSV must contain a value column.")
+    y = df[ycols[0]]
+    if isinstance(y, pd.DataFrame):
+        y = y.iloc[:, 0]
+    return y
+
+
+def load_group_map(path: str) -> Dict[str, str]:
+    """
+    Load a mapping var -> group from JSON.
+
+    Accepts either:
+      { "RPI": "Output & Income", ... }
+    or:
+      { "groups": { "RPI": "Output & Income", ... } }
+    """
+    obj = json.loads(Path(path).read_text(encoding="utf-8"))
+    if isinstance(obj, dict):
+        if "groups" in obj and isinstance(obj["groups"], dict):
+            return {str(k): str(v) for k, v in obj["groups"].items()}
+        # assume flat mapping var -> group
+        return {str(k): str(v) for k, v in obj.items()}
+    raise ValueError(f"Unsupported group map format in {path!r}")
+
+
+# ---------------------------------------------------------------------
+# Quarterly aggregation
+# ---------------------------------------------------------------------
+
+
+def aggregate_series_quarterly(
+    series: pd.Series,
+    rule: str,
+) -> pd.Series:
+    """
+    Aggregate a monthly series to quarterly according to `rule`.
+
+    Assumes:
+    - series index is a DatetimeIndex with monthly dates (typically month-end).
+    - rule ∈ {"sum3m", "mean3m"} in your current JSON.
+    """
+    if series.empty:
+        return series.copy()
+
+    idx = pd.DatetimeIndex(series.index)
+    per = idx.to_period("Q")
+
+    if rule == "sum3m":
+        xq = series.groupby(per).sum()
+    elif rule == "mean3m":
+        xq = series.groupby(per).mean()
     else:
-        raise ValueError("method must be one of {'sis','tstat','lars'}")
+        raise ValueError(f"Unsupported aggregation rule: {rule!r}")
 
-    # Persist artifacts
-    params = {
-        "min_features": int(min_features),
-        "max_features": int(max_features),
-        "dedup_tau": float(dedup_tau),
-        "sis_tau": float(sis_tau),
-        "sis_topn": int(sis_topn),
-        "tstat_alpha": float(tstat_alpha),
-        "tstat_topn": int(tstat_topn),
-        "tstat_ar_lags": int(tstat_ar_lags),
-        "hac_lags": hac_lags,
-        "agg_rule_map": agg_rule_map,
-        "agg_rule_default": agg_rule_default,
-        "x_adl_lags": int(x_adl_lags),
-        "adl_score": adl_score,
-        "cv": int(cv),
-        "label": label,
-    }
-    _write_outputs(panel, tag, method, cols, X, params, label=label)
+    # Cast index to PeriodIndex for type-checker, then to quarterly timestamps
+    per_idx = cast("pd.PeriodIndex", xq.index)
+    xq.index = per_idx.to_timestamp(how="start")
 
-    print(f"{panel} {tag} {method}: selected {len(cols)} vars (label={label or '-'})")
-    return cols
+    return xq
 
 
-def main():
-    ap = argparse.ArgumentParser(description="Baseline variable preselection (SIS / t-stat / LARS).")
-    ap.add_argument("--panel", required=True, help="Panel id, e.g., 1960_noVIX or 1965_withVIX")
-    ap.add_argument("--tag", required=True, help="Training tag, e.g., train1960_2015")
-    ap.add_argument("--method", choices=["sis", "tstat", "lars", "all"], default="all")
+def aggregate_panel_quarterly(
+    panel_train: pd.DataFrame,
+    agg_map: Dict[str, Any],
+    agg_default_rule: str | None,
+) -> pd.DataFrame:
+    """
+    Apply quarterly aggregation to each column in the monthly panel.
 
-    # Global guardrails
-    ap.add_argument("--min_features", type=int, default=30)
-    ap.add_argument("--max_features", type=int, default=80)
-    ap.add_argument("--dedup_tau", type=float, default=0.98)
+    Parameters
+    ----------
+    panel_train : monthly standardized panel (train), index = monthly dates.
+    agg_map : mapping series_name -> rule info
+        For your JSON, this is cfg["series_rules"], so each value is a dict
+        like {"type": "return", "rule": "sum3m", "group": "..."}.
+        If a value is a primitive string, it is taken as the rule itself.
+    agg_default_rule : if not None, use this rule when a column is missing
+        from agg_map; if None, raise if a column has no rule.
 
-    # SIS knobs
-    ap.add_argument("--sis_tau", type=float, default=0.0)
-    ap.add_argument("--sis_topn", type=int, default=0)
+    Returns
+    -------
+    panel_q : DataFrame with quarterly aggregated series, index at quarter start.
+    """
+    if panel_train.empty:
+        return panel_train.copy()
 
-    # t-stat knobs
-    ap.add_argument("--tstat_alpha", type=float, default=0.0)
-    ap.add_argument("--tstat_topn", type=int, default=0)
-    ap.add_argument("--tstat_ar_lags", type=int, default=0,
-                    help="AR lags of y to include in t-stat regressions (0 = none, 4 = AR(4)).")
-    ap.add_argument("--hac_lags", default="auto",
-                    help='Newey–West HAC lags for t-stat ("auto" or integer).')
+    out: Dict[str, pd.Series] = {}
+    for col in panel_train.columns:
+        info = agg_map.get(col)
+        if info is None:
+            if agg_default_rule is None:
+                raise ValueError(
+                    f"No aggregation rule for series '{col}' and no agg-default-rule provided."
+                )
+            rule = agg_default_rule
+        else:
+            if isinstance(info, dict):
+                rule = info.get("rule")
+                if rule is None:
+                    if agg_default_rule is None:
+                        raise ValueError(
+                            f"Aggregation info for series '{col}' has no 'rule' field "
+                            f"and no agg-default-rule is provided."
+                        )
+                    rule = agg_default_rule
+            else:
+                # assume flat mapping series -> rule
+                rule = str(info)
 
-    # Aggregation controls (for t-stat)
-    ap.add_argument("--agg_rule_map", type=str, default=None,
-                    help="Path to per-series aggregation rules JSON (sum3m/mean3m/last per column).")
-    ap.add_argument("--agg_rule_default", type=str, default=None,
-                    choices=["sum3m", "mean3m", "last"],
-                    help="Apply one aggregation rule to all series if no map is provided.")
+        s = panel_train[col]
+        out[col] = aggregate_series_quarterly(s, rule=rule)
 
-    # ADL controls (for t-stat)
-    ap.add_argument("--x_adl_lags", type=int, default=0,
-                    help="Number of short lags of each X to include as a block (0 = off).")
-    ap.add_argument("--adl_score", type=str, default="fstat", choices=["fstat", "max_t"],
-                    help="Scoring for ADL block: 'fstat' (joint F) or 'max_t' among block coefficients.")
+    panel_q = pd.DataFrame(out).sort_index()
+    return panel_q
 
-    # LARS knob
-    ap.add_argument("--cv", type=int, default=10, help="CV folds for LARS (LassoLarsCV)")
 
-    # Labeling
-    ap.add_argument("--label", type=str, default=None,
-                    help="Suffix to append to output filenames for this run.")
+def apply_aggregation_for_ranking(
+    panel_train: pd.DataFrame,
+    y_train: pd.Series,
+    agg_map: Dict[str, Any],
+    agg_default_rule: str | None,
+    agg_mode: str,
+) -> Tuple[pd.DataFrame, pd.Series]:
+    """
+    Prepare (X_rank, y_rank) for preselection.
+
+    If agg_mode == "none":
+        - Align monthly panel and (monthly) y on intersection of dates.
+
+    If agg_mode == "quarterly":
+        - Aggregate monthly panel to quarterly using agg_map / agg_default_rule.
+        - Align quarterly panel and quarterly y on intersection of dates.
+    """
+    if agg_mode == "none":
+        panel_align, y_align = panel_train.align(y_train, join="inner", axis=0)
+        return panel_align, y_align
+
+    if agg_mode != "quarterly":
+        raise ValueError(f"Unsupported agg_mode={agg_mode!r}. Use 'none' or 'quarterly'.")
+
+    # 1) Aggregate monthly X to quarterly
+    panel_q = aggregate_panel_quarterly(panel_train, agg_map, agg_default_rule)
+
+    # 2) Ensure y has DatetimeIndex; in your pipeline, target is already quarterly
+    y_q = y_train.copy()
+    y_q.index = pd.DatetimeIndex(y_q.index)
+
+    # 3) Align on intersection of quarterly dates
+    idx_common = panel_q.index.intersection(y_q.index)
+    if idx_common.empty:
+        raise ValueError("No overlapping quarterly dates between panel and target after aggregation.")
+
+    X_rank = panel_q.loc[idx_common].sort_index()
+    y_rank = y_q.loc[idx_common].sort_index()
+    return X_rank, y_rank
+
+
+# ---------------------------------------------------------------------
+# Method dispatch (SIS / tstat / LARS)
+# ---------------------------------------------------------------------
+
+
+def run_sis(
+    X_rank: pd.DataFrame,
+    y_rank: pd.Series,
+    params: Dict[str, Any],
+) -> Tuple[pd.DataFrame, List[str], Dict[str, Any]]:
+    """
+    SIS preselection wrapper.
+
+    Delegates to src.dfm_pipeline.preselection.preselect_sis.run_sis_preselection.
+    """
+    rank_df, selected_vars, meta = run_sis_preselection(X_rank, y_rank, params)
+    return rank_df, selected_vars, meta
+
+
+def run_tstat(
+    X_rank: pd.DataFrame,
+    y_rank: pd.Series,
+    params: Dict[str, Any],
+) -> Tuple[pd.DataFrame, List[str], Dict[str, Any]]:
+    """
+    t-stat preselection wrapper.
+
+    Delegates to src.dfm_pipeline.preselection.preselect_tstat.run_tstat_preselection.
+    """
+    rank_df, selected_vars, meta = run_tstat_preselection(X_rank, y_rank, params)
+    return rank_df, selected_vars, meta
+
+
+def run_lars_tscv(
+    X_rank: pd.DataFrame,
+    y_rank: pd.Series,
+    params: Dict[str, Any],
+) -> Tuple[pd.DataFrame, List[str], Dict[str, Any]]:
+    """
+    LARS + time-series CV preselection wrapper.
+
+    Delegates to src.dfm_pipeline.preselection.preselect_lars.run_lars_tscv_preselection.
+    """
+    rank_df, selected_vars, meta = run_lars_tscv_preselection(X_rank, y_rank, params)
+    return rank_df, selected_vars, meta
+
+
+# ---------------------------------------------------------------------
+# Artifact writing (with group info)
+# ---------------------------------------------------------------------
+
+
+def write_artifacts(
+    panel_name: str,
+    variant_name: str,
+    variants_root: str,
+    train_start: str,
+    train_end: str,
+    rank_df: pd.DataFrame,
+    selected_vars: List[str],
+    info: PreselectionInfo,
+    group_map: Dict[str, str] | None = None,
+) -> None:
+    """
+    Save selected_vars.json, rank.csv (+ group column if group_map given),
+    info.json, and optional selected_vars_with_group.json under:
+
+      {variants_root}/{variant_name}/{panel_name}/{train_start}_{train_end}/
+    """
+    span = fmt_span_full(train_start, train_end)
+    outdir = Path(variants_root) / variant_name / panel_name / span
+    ensure_dir(outdir)
+
+    sel_path = outdir / "selected_vars.json"
+    rank_path = outdir / "rank.csv"
+    info_path = outdir / "info.json"
+
+    # Selected vars: keep legacy list format
+    sel_path.write_text(
+        json.dumps(selected_vars, indent=2, sort_keys=True), encoding="utf-8"
+    )
+
+    # Rank: add group column if group_map provided
+    rank_to_save = rank_df.copy()
+    if group_map is not None and not rank_to_save.empty:
+        rank_to_save["group"] = [
+            group_map.get(str(var), None) for var in rank_to_save.index
+        ]
+    rank_to_save.to_csv(rank_path, index=True)
+
+    # Info JSON
+    info_path.write_text(
+        json.dumps(asdict(info), indent=2, sort_keys=True), encoding="utf-8"
+    )
+
+    print(f"[preselection] wrote: {sel_path}")
+    print(f"[preselection] rank:  {rank_path}")
+    print(f"[preselection] info:  {info_path}")
+
+    # Optional: selected_vars_with_group.json
+    if group_map is not None:
+        sel_groups = {var: group_map.get(str(var), None) for var in selected_vars}
+        sel_with_group_path = outdir / "selected_vars_with_group.json"
+        sel_with_group_path.write_text(
+            json.dumps(sel_groups, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        print(f"[preselection] groups: {sel_with_group_path}")
+
+
+# ---------------------------------------------------------------------
+# Main CLI
+# ---------------------------------------------------------------------
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(
+        description="Run variable preselection (SIS / tstat / LARS) on training panel."
+    )
+
+    # Core inputs
+    ap.add_argument(
+        "--panel-csv",
+        required=True,
+        help="Path to TRAIN panel CSV (e.g. dataset/...__train_1990_01_2019_12.csv).",
+    )
+    ap.add_argument(
+        "--target-csv",
+        required=True,
+        help="Path to TRAIN target CSV (e.g. data/targets/...__train_1990_01_2019_12.csv).",
+    )
+    ap.add_argument("--panel-name", required=True, help="Logical panel id, e.g. 1960_noVIX.")
+    ap.add_argument(
+        "--train-start",
+        required=True,
+        help="Start of training window (YYYY-MM-01). Must match the TRAIN panel.",
+    )
+    ap.add_argument(
+        "--train-end",
+        required=True,
+        help="End of training window (YYYY-MM-01). Must match the TRAIN panel.",
+    )
+
+    # Method choice
+    ap.add_argument(
+        "--method",
+        choices=["sis", "tstat", "lars_tscv"],
+        required=True,
+        help="Preselection method to run.",
+    )
+
+    # Aggregation
+    ap.add_argument(
+        "--agg-mode",
+        choices=["none", "quarterly"],
+        default="quarterly",
+        help="Aggregation mode for X before preselection. "
+             "'quarterly' for within-quarter aggregation vs quarterly y.",
+    )
+    ap.add_argument(
+        "--agg-rule-path",
+        default="",
+        help="JSON file with aggregation rules (Linzenich–Meunier format with 'series_rules').",
+    )
+    ap.add_argument(
+        "--agg-default-rule",
+        default=None,
+        help=(
+            "Optional fallback aggregation rule (e.g. sum3m) for series not in agg-rule-path. "
+            "If omitted and a series is missing, an error is raised."
+        ),
+    )
+
+    # Group map (for annotations)
+    ap.add_argument(
+        "--group-map-path",
+        default="",
+        help="Optional JSON mapping variable -> group (e.g. data/metadata/variable_group_map.json). "
+             "Used to annotate rank.csv and selected_vars_with_group.json.",
+    )
+
+    # Variant naming and output root
+    ap.add_argument(
+        "--variant-name",
+        required=True,
+        help="Name for this preselection variant (used in output directory).",
+    )
+    ap.add_argument(
+        "--variants-root",
+        default="data/metadata/variants",
+        help="Root directory where variants are stored.",
+    )
+
+    # Method-specific kwargs as JSON string
+    ap.add_argument(
+        "--method-kwargs",
+        default="",
+        help="JSON string with method-specific hyperparameters (passed to SIS/tstat/LARS).",
+    )
 
     args = ap.parse_args()
 
-    methods = ["sis", "tstat", "lars"] if args.method == "all" else [args.method]
-    for m in methods:
-        try:
-            run_for_one(
-                args.panel,
-                args.tag,
-                m,
-                min_features=args.min_features,
-                max_features=args.max_features,
-                dedup_tau=args.dedup_tau,
-                sis_tau=args.sis_tau,
-                sis_topn=args.sis_topn,
-                tstat_alpha=args.tstat_alpha,
-                tstat_topn=args.tstat_topn,
-                tstat_ar_lags=args.tstat_ar_lags,
-                hac_lags=args.hac_lags,
-                agg_rule_map=args.agg_rule_map,
-                agg_rule_default=args.agg_rule_default,
-                x_adl_lags=args.x_adl_lags,
-                adl_score=args.adl_score,
-                cv=args.cv,
-                label=args.label,
+    # -----------------------------------------------------------------
+    # Load panel and target (TRAIN artifacts, already standardized)
+    # -----------------------------------------------------------------
+    panel_full = load_panel(args.panel_csv)
+    y_full = load_target(args.target_csv)
+
+    # Restrict both to the TRAIN window (for safety, even if CSVs are already cropped)
+    panel_train = clip_window(panel_full, args.train_start, args.train_end)
+    y_train = clip_window(y_full, args.train_start, args.train_end)
+
+    if panel_train.empty:
+        raise ValueError("Training panel is empty after clipping to train window.")
+    if y_train.empty:
+        raise ValueError("Training target is empty after clipping to train window.")
+
+    # -----------------------------------------------------------------
+    # Aggregation map
+    # -----------------------------------------------------------------
+    agg_map: Dict[str, Any] = {}
+    agg_default_rule: str | None = args.agg_default_rule
+
+    if args.agg_mode == "quarterly":
+        if not args.agg_rule_path and agg_default_rule is None:
+            raise ValueError(
+                "quarterly agg-mode requires either --agg-rule-path or --agg-default-rule."
             )
-        except Exception as e:
-            print(f"[ERROR] {args.panel} {args.tag} {m}: {e}")
-            raise
+
+        if args.agg_rule_path:
+            cfg = json.loads(Path(args.agg_rule_path).read_text(encoding="utf-8"))
+
+            # EXPECTED STRUCTURE (Linzenich–Meunier style):
+            # {
+            #   "_meta": {...},
+            #   "series_rules": {
+            #       "RPI": { "type": "...", "rule": "sum3m", "group": "..." },
+            #       ...
+            #   }
+            # }
+            if "series_rules" in cfg:
+                agg_map = cfg["series_rules"]
+            else:
+                # fallback: assume flat mapping series -> rule or series -> {rule: ...}
+                agg_map = cfg
+        else:
+            agg_map = {}  # rely entirely on agg_default_rule for all series
+
+    elif args.agg_mode == "none":
+        agg_map = {}
+
+    # -----------------------------------------------------------------
+    # Build ranking panel (X_rank, y_rank)
+    # -----------------------------------------------------------------
+    X_rank, y_rank = apply_aggregation_for_ranking(
+        panel_train=panel_train,
+        y_train=y_train,
+        agg_map=agg_map,
+        agg_default_rule=agg_default_rule,
+        agg_mode=args.agg_mode,
+    )
+
+    # -----------------------------------------------------------------
+    # Parse method kwargs
+    # -----------------------------------------------------------------
+    if args.method_kwargs.strip():
+        try:
+            method_params: Dict[str, Any] = json.loads(args.method_kwargs)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON for --method-kwargs: {e}") from e
+    else:
+        method_params = {}
+
+    # -----------------------------------------------------------------
+    # Run chosen method
+    # -----------------------------------------------------------------
+    if args.method == "sis":
+        rank_df, selected_vars, meta = run_sis(X_rank, y_rank, method_params)
+    elif args.method == "tstat":
+        rank_df, selected_vars, meta = run_tstat(X_rank, y_rank, method_params)
+    elif args.method == "lars_tscv":
+        rank_df, selected_vars, meta = run_lars_tscv(X_rank, y_rank, method_params)
+    else:
+        raise ValueError(f"Unknown method {args.method!r}.")
+
+    # -----------------------------------------------------------------
+    # Load group map (optional) for annotations
+    # -----------------------------------------------------------------
+    group_map: Dict[str, str] | None = None
+    if args.group_map_path:
+        group_map = load_group_map(args.group_map_path)
+
+    # -----------------------------------------------------------------
+    # Build info object and write artifacts
+    # -----------------------------------------------------------------
+    info = PreselectionInfo(
+        panel_name=args.panel_name,
+        method=args.method,
+        variant_name=args.variant_name,
+        train_start=args.train_start,
+        train_end=args.train_end,
+        agg_mode=args.agg_mode,
+        agg_rule_path=args.agg_rule_path or None,
+        agg_default_rule=args.agg_default_rule,
+        n_obs=int(len(X_rank)),
+        n_features_in=int(X_rank.shape[1]),
+        n_features_selected=int(len(selected_vars)),
+        method_kwargs=method_params,
+    )
+
+    write_artifacts(
+        panel_name=args.panel_name,
+        variant_name=args.variant_name,
+        variants_root=args.variants_root,
+        train_start=args.train_start,
+        train_end=args.train_end,
+        rank_df=rank_df,
+        selected_vars=selected_vars,
+        info=info,
+        group_map=group_map,
+    )
 
 
 if __name__ == "__main__":
-    # import sys
-    # sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
     main()

@@ -1,0 +1,621 @@
+{
+  "_meta": {
+    "panel": "1960_noVIX",
+    "tag": "train1990_2019",
+    "standardized_x": "dataset\\1960_noVIX\\training_sets\\train1990_2019\\standardized_train__1960_noVIX__train1990_2019.csv",
+    "group_map": "data\\metadata\\variable_group_map.json",
+    "tcode_map": "data\\metadata\\tcode_map.json",
+    "defaults": {
+      "flow": "sum3m",
+      "level": "mean3m",
+      "return": "sum3m"
+    }
+  },
+  "series_rules": {
+    "RPI": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Output & Income"
+    },
+    "W875RX1": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Output & Income"
+    },
+    "DPCERA3M086SBEA": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Output & Income"
+    },
+    "CMRMTSPLx": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Output & Income"
+    },
+    "RETAILx": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Output & Income"
+    },
+    "INDPRO": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Output & Income"
+    },
+    "IPFPNSS": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Output & Income"
+    },
+    "IPFINAL": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Output & Income"
+    },
+    "IPCONGD": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Output & Income"
+    },
+    "IPDCONGD": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Output & Income"
+    },
+    "IPNCONGD": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Output & Income"
+    },
+    "IPBUSEQ": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Output & Income"
+    },
+    "IPMAT": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Output & Income"
+    },
+    "IPDMAT": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Output & Income"
+    },
+    "IPNMAT": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Output & Income"
+    },
+    "IPMANSICS": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Output & Income"
+    },
+    "IPB51222S": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Output & Income"
+    },
+    "IPFUELS": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Output & Income"
+    },
+    "CUMFNS": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Output & Income"
+    },
+    "HWI": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Labor Market"
+    },
+    "HWIURATIO": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Labor Market"
+    },
+    "CLF16OV": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Labor Market"
+    },
+    "CE16OV": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Labor Market"
+    },
+    "UNRATE": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Labor Market"
+    },
+    "UEMPMEAN": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Labor Market"
+    },
+    "UEMPLT5": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Labor Market"
+    },
+    "UEMP5TO14": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Labor Market"
+    },
+    "UEMP15OV": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Labor Market"
+    },
+    "UEMP15T26": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Labor Market"
+    },
+    "UEMP27OV": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Labor Market"
+    },
+    "CLAIMSx": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Labor Market"
+    },
+    "PAYEMS": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Labor Market"
+    },
+    "USGOOD": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Labor Market"
+    },
+    "CES1021000001": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Labor Market"
+    },
+    "USCONS": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Labor Market"
+    },
+    "MANEMP": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Labor Market"
+    },
+    "DMANEMP": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Labor Market"
+    },
+    "NDMANEMP": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Labor Market"
+    },
+    "SRVPRD": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Labor Market"
+    },
+    "USTPU": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Labor Market"
+    },
+    "USWTRADE": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Labor Market"
+    },
+    "USTRADE": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Labor Market"
+    },
+    "USFIRE": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Labor Market"
+    },
+    "USGOVT": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Labor Market"
+    },
+    "CES0600000007": {
+      "type": "level",
+      "rule": "mean3m",
+      "group": "Labor Market"
+    },
+    "AWOTMAN": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Labor Market"
+    },
+    "AWHMAN": {
+      "type": "level",
+      "rule": "mean3m",
+      "group": "Labor Market"
+    },
+    "HOUST": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Housing"
+    },
+    "HOUSTNE": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Housing"
+    },
+    "HOUSTMW": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Housing"
+    },
+    "HOUSTS": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Housing"
+    },
+    "HOUSTW": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Housing"
+    },
+    "PERMIT": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Housing"
+    },
+    "PERMITNE": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Housing"
+    },
+    "PERMITMW": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Housing"
+    },
+    "PERMITS": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Housing"
+    },
+    "PERMITW": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Housing"
+    },
+    "AMDMNOx": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Orders & Inventories"
+    },
+    "AMDMUOx": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Orders & Inventories"
+    },
+    "BUSINVx": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Orders & Inventories"
+    },
+    "ISRATIOx": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Orders & Inventories"
+    },
+    "M1SL": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Money & Credit"
+    },
+    "M2SL": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Money & Credit"
+    },
+    "M2REAL": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Money & Credit"
+    },
+    "BOGMBASE": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Money & Credit"
+    },
+    "TOTRESNS": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Money & Credit"
+    },
+    "NONBORRES": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Money & Credit"
+    },
+    "BUSLOANS": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Money & Credit"
+    },
+    "REALLN": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Money & Credit"
+    },
+    "NONREVSL": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Money & Credit"
+    },
+    "CONSPI": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Money & Credit"
+    },
+    "S&P 500": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Stock Market"
+    },
+    "S&P div yield": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Stock Market"
+    },
+    "S&P PE ratio": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Stock Market"
+    },
+    "FEDFUNDS": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Interest & Exchange Rates"
+    },
+    "CP3Mx": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Interest & Exchange Rates"
+    },
+    "TB3MS": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Interest & Exchange Rates"
+    },
+    "TB6MS": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Interest & Exchange Rates"
+    },
+    "GS1": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Interest & Exchange Rates"
+    },
+    "GS5": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Interest & Exchange Rates"
+    },
+    "GS10": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Interest & Exchange Rates"
+    },
+    "AAA": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Interest & Exchange Rates"
+    },
+    "BAA": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Interest & Exchange Rates"
+    },
+    "COMPAPFFx": {
+      "type": "level",
+      "rule": "mean3m",
+      "group": "Interest & Exchange Rates"
+    },
+    "TB3SMFFM": {
+      "type": "level",
+      "rule": "mean3m",
+      "group": "Interest & Exchange Rates"
+    },
+    "TB6SMFFM": {
+      "type": "level",
+      "rule": "mean3m",
+      "group": "Interest & Exchange Rates"
+    },
+    "T1YFFM": {
+      "type": "level",
+      "rule": "mean3m",
+      "group": "Interest & Exchange Rates"
+    },
+    "T5YFFM": {
+      "type": "level",
+      "rule": "mean3m",
+      "group": "Interest & Exchange Rates"
+    },
+    "T10YFFM": {
+      "type": "level",
+      "rule": "mean3m",
+      "group": "Interest & Exchange Rates"
+    },
+    "AAAFFM": {
+      "type": "level",
+      "rule": "mean3m",
+      "group": "Interest & Exchange Rates"
+    },
+    "BAAFFM": {
+      "type": "level",
+      "rule": "mean3m",
+      "group": "Interest & Exchange Rates"
+    },
+    "EXSZUSx": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Exchange Rates"
+    },
+    "EXJPUSx": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Exchange Rates"
+    },
+    "EXUSUKx": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Exchange Rates"
+    },
+    "EXCAUSx": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Exchange Rates"
+    },
+    "WPSFD49207": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Prices"
+    },
+    "WPSFD49502": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Prices"
+    },
+    "WPSID61": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Prices"
+    },
+    "WPSID62": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Prices"
+    },
+    "OILPRICEx": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Prices"
+    },
+    "PPICMM": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Prices"
+    },
+    "CPIAUCSL": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Prices"
+    },
+    "CPIAPPSL": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Prices"
+    },
+    "CPITRNSL": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Prices"
+    },
+    "CPIMEDSL": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Prices"
+    },
+    "CUSR0000SAC": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Prices"
+    },
+    "CUSR0000SAD": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Prices"
+    },
+    "CUSR0000SAS": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Prices"
+    },
+    "CPIULFSL": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Prices"
+    },
+    "CUSR0000SA0L2": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Prices"
+    },
+    "CUSR0000SA0L5": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Prices"
+    },
+    "PCEPI": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Prices"
+    },
+    "DDURRG3M086SBEA": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Consumption & Investment"
+    },
+    "DNDGRG3M086SBEA": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Consumption & Investment"
+    },
+    "DSERRG3M086SBEA": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Consumption & Investment"
+    },
+    "CES0600000008": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Consumption & Investment"
+    },
+    "CES2000000008": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Consumption & Investment"
+    },
+    "CES3000000008": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Consumption & Investment"
+    },
+    "DTCOLNVHFNM": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Expectations"
+    },
+    "DTCTHFNM": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Expectations"
+    },
+    "INVEST": {
+      "type": "return",
+      "rule": "sum3m",
+      "group": "Expectations"
+    }
+  }
+}

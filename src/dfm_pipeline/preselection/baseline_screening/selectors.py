@@ -1,3 +1,4 @@
+# FILE: src/dfm_pipeline/preselection/baseline_screening/selectors.py
 #!/usr/bin/env python3
 """
 Selectors: SIS, t-stat (HAC + optional AR(y) + optional X aggregation + optional ADL block),
@@ -9,7 +10,7 @@ sis_select(X, y, *, min_features, max_features, dedup_tau, sis_tau=0.0, sis_topn
 tstat_select(X, y, *, min_features, max_features, dedup_tau, tstat_alpha=0.05, tstat_topn=0,
              hac_lags="auto", ar_lags=0, agg_rule_map=None, agg_rule_default=None,
              x_adl_lags=0, adl_score="fstat")
-lars_select(X, y, *, min_features, max_features, dedup_tau, cv=10)
+lars_select(X, y, *, min_features, max_features, dedup_tau, cv=10, one_se=False)
 """
 from __future__ import annotations
 
@@ -24,10 +25,11 @@ except Exception:  # pragma: no cover
     sm = None
 
 try:
-    from sklearn.linear_model import LassoLarsCV
+    from sklearn.linear_model import LassoLarsCV, LassoLars
     from sklearn.model_selection import TimeSeriesSplit
 except Exception:  # pragma: no cover
     LassoLarsCV = None  # type: ignore[assignment]
+    LassoLars = None    # type: ignore[assignment]
     TimeSeriesSplit = None  # type: ignore[assignment]
 
 # ---------- utilities ----------
@@ -77,6 +79,9 @@ def _enforce_min_max(selected: List[str], ranked: Iterable[str], min_features: i
     return s
 
 def _hac_lags_auto(n: int) -> int:
+    """
+    HAC auto bandwidth: floor(4 * (n/100)^(2/9)), min 1.
+    """
     if n <= 0:
         return 1
     lag = int(np.floor(4.0 * (n / 100.0) ** (2.0 / 9.0)))
@@ -88,10 +93,14 @@ from pathlib import Path
 
 def _aggregate_monthly_to_quarterly_matrix(
     X: pd.DataFrame,
-    y: pd.Series,
+    y: pd.Series,  # not used; kept for backward compatibility
     rule_default: str | None,
     rule_map_path: str | None,
 ) -> pd.DataFrame:
+    """
+    Build a quarterly-aligned matrix from monthly X using:
+      - mean3m / sum3m (rolling 3) or last, each with shift(1) to avoid look-ahead.
+    """
     # Precompute
     sum3 = X.rolling(3).sum().shift(1)
     mean3 = X.rolling(3).mean().shift(1)
@@ -158,6 +167,11 @@ def _fit_ols_and_stats(yv: np.ndarray, Xv: np.ndarray, hac_lags: Optional[int]):
     res = mod.fit() if hac_lags is None else mod.fit(cov_type="HAC", cov_kwds={"maxlags": int(hac_lags)})
     return res.params, res.resid, res.cov_params(), res.tvalues, res
 
+def _p_from_t_norm(t: float) -> float:
+    # Two-sided normal-approx p-value (used only if statsmodels is unavailable)
+    from math import erf, sqrt
+    return 2.0 * (1.0 - 0.5 * (1.0 + erf(abs(t) / sqrt(2.0))))
+
 def tstat_select(
     X: pd.DataFrame,
     y: pd.Series,
@@ -183,9 +197,16 @@ def tstat_select(
 
     n = int(y.notna().sum())
 
-    # HAC lags
+    # HAC lags: accept "auto", an int, or a numeric string ("4")
     if isinstance(hac_lags, str):
-        hac = _hac_lags_auto(n) if hac_lags.lower() == "auto" else None
+        hl = hac_lags.strip().lower()
+        if hl == "auto":
+            hac = _hac_lags_auto(n)
+        else:
+            try:
+                hac = int(hl)
+            except ValueError:
+                hac = None
     else:
         hac = int(hac_lags)
 
@@ -241,8 +262,10 @@ def tstat_select(
         if p_blk == 1:
             # Classic single-regressor: use t on the feature
             t_last = float(abs(tvalues[blk_end - 1]))
-            # p-value only available if statsmodels; approximated otherwise as NaN
-            p_last = float(getattr(res, "pvalues", [np.nan]*p_total)[blk_end - 1]) if res is not None else np.nan
+            if res is not None and hasattr(res, "pvalues"):
+                p_last = float(res.pvalues[blk_end - 1])
+            else:
+                p_last = _p_from_t_norm(t_last)  # normal-approx fallback
             scores[c] = t_last if adl_score == "max_t" else t_last  # same in single-var case
             pvals[c] = p_last if tstat_alpha > 0 else np.nan
         else:
@@ -261,7 +284,7 @@ def tstat_select(
                 # Rank by max |t| in the block; gate by min p in the block (if available)
                 t_block = np.asarray(tvalues[blk_start:blk_end], dtype=float)
                 scores[c] = float(np.nanmax(np.abs(t_block)))
-                if res is not None and tstat_alpha > 0:
+                if res is not None and hasattr(res, "pvalues") and tstat_alpha > 0:
                     p_block = np.asarray(res.pvalues[blk_start:blk_end], dtype=float)
                     pvals[c] = float(np.nanmin(p_block))
                 else:
@@ -293,6 +316,7 @@ def lars_select(
     max_features: int,
     dedup_tau: float,
     cv: int = 10,
+    one_se: bool = False,
 ) -> List[str]:
     if LassoLarsCV is None or TimeSeriesSplit is None:
         raise RuntimeError("scikit-learn is required for LARS selection")
@@ -304,8 +328,46 @@ def lars_select(
     if len(cols) == 0:
         return []
     tscv = TimeSeriesSplit(n_splits=int(cv))
-    model = cast("LassoLarsCV", LassoLarsCV(cv=tscv).fit(Xv, yv))  # type: ignore[call-arg]
-    coef = getattr(model, "coef_", None)
+    model = cast("LassoLarsCV", LassoLarsCV(cv=tscv, fit_intercept=False).fit(Xv, yv))  # type: ignore[call-arg]
+
+    if one_se:
+        if LassoLars is None:
+            raise RuntimeError("scikit-learn (LassoLars) required for 1-SE refit")
+
+        # Robust 1-SE selection across sklearn versions:
+        # mse_path_ can be (n_alphas, n_folds) or (n_folds, n_alphas)
+        mse_path = np.asarray(model.mse_path_)
+        alphas = np.asarray(model.alphas_)
+
+        if mse_path.ndim != 2:
+            # Fallback: treat all along last axis as alphas
+            axis_alphas, axis_folds = -1, 0
+        elif mse_path.shape[0] == alphas.shape[0]:
+            axis_alphas, axis_folds = 0, 1   # (A, K)
+        elif mse_path.shape[1] == alphas.shape[0]:
+            axis_alphas, axis_folds = 1, 0   # (K, A)
+        else:
+            axis_alphas, axis_folds = -1, 0  # fallback
+
+        mse_mean = mse_path.mean(axis=axis_folds)
+        mse_std  = mse_path.std(axis=axis_folds)
+        K = int(mse_path.shape[axis_folds]) if mse_path.ndim == 2 else 1
+        mse_se = mse_std / np.sqrt(max(K, 1))
+
+        mse_mean = np.asarray(mse_mean).ravel()
+        mse_se   = np.asarray(mse_se).ravel()
+
+        i_min = int(np.nanargmin(mse_mean))
+        thresh = float(mse_mean[i_min] + mse_se[i_min])
+
+        candidates = [i for i, m in enumerate(mse_mean) if np.isfinite(m) and m <= thresh]
+        i_choice = (max(candidates) if candidates else i_min)
+        i_choice = max(0, min(i_choice, len(alphas) - 1))  # clamp
+
+        coef = LassoLars(alpha=float(alphas[i_choice]), fit_intercept=False).fit(Xv, yv).coef_
+    else:
+        coef = getattr(model, "coef_", None)
+
     if coef is None:
         return []
     nz = np.where(np.abs(coef) > 1e-12)[0]

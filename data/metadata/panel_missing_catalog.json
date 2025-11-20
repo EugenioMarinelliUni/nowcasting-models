@@ -1,0 +1,12 @@
+{
+  "input_csv": "data\\processed_data\\panel_transformed.csv",
+  "artifacts": {
+    "by_series_csv": "data\\quality_checks\\panel_missing_by_series.csv",
+    "summary_json": "data\\metadata\\panel_missing_summary.json",
+    "positions_jsonl": "data\\quality_checks\\missing_positions.jsonl",
+    "runs_csv": "data\\quality_checks\\missing_runs.csv"
+  },
+  "params": {
+    "date_format": "%m/%d/%Y"
+  }
+}
