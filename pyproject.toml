@@ -9,5 +9,9 @@ requires-python = ">=3.10"
 description = "DFM ingestion + preprocessing utilities"
 readme = "README.md"
 
+[tool.setuptools]
+package-dir = {"" = "src"}        # tell setuptools the source root is src
+
 [tool.setuptools.packages.find]
-where = ["src"]   # so src/dfm_pipeline is found
+where = ["src"]                    # discover packages under src
+
