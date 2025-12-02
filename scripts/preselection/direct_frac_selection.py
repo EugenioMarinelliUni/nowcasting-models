@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -182,6 +183,38 @@ def main() -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     sel.to_csv(out_path, index=False)
     print(f"[direct_selection] mode={args.mode} -> {out_path} (n={len(sel)})")
+
+    # Also emit a __selected.json metadata file
+    selected_vars = sel["variable"].astype(str).tolist()
+
+    meta: dict = {
+        "selected": selected_vars,
+        "source_comparison_csv": str(Path(args.comparison_csv)),
+        "mode": args.mode,
+        "params": {},
+    }
+    if args.mode == "stability":
+        meta["params"] = {
+            "stab_threshold": float(args.stab_threshold),
+            # thresholds below are not used for selection in this mode, but useful as diagnostics
+            "sis_threshold_diag": float(args.sis_threshold),
+            "tstat_threshold_diag": float(args.tstat_threshold),
+            "lars_threshold_diag": float(args.lars_threshold),
+        }
+    else:  # vote
+        meta["params"] = {
+            "sis_threshold": float(args.sis_threshold),
+            "tstat_threshold": float(args.tstat_threshold),
+            "lars_threshold": float(args.lars_threshold),
+            "min_votes": int(args.min_votes),
+        }
+
+    stem = out_path.with_suffix("").name
+    json_name = f"{stem}__selected.json"
+    json_path = out_path.with_name(json_name)
+
+    json_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    print(f"[direct_selection] wrote JSON selection meta: {json_path}")
 
 
 if __name__ == "__main__":
