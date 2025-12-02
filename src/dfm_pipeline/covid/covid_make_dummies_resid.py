@@ -7,12 +7,26 @@ import numpy as np
 import pandas as pd
 
 
-def _ts_month_end(x: str) -> pd.Timestamp:
+def _ts_month_boundary(x: str, monthly_freq: str = "MS") -> pd.Timestamp:
     """
-    Convert 'YYYY-MM' or 'YYYY-MM-DD' string to a month-end Timestamp.
+    Convert 'YYYY-MM' or 'YYYY-MM-DD' string to a month boundary Timestamp.
+
+    Parameters
+    ----------
+    x : str
+        Date-like string, at least 'YYYY-MM'.
+    monthly_freq : {"MS", "ME"}
+        - "MS": normalize to month-start.
+        - "ME": normalize to month-end.
+
+    Returns
+    -------
+    pd.Timestamp
     """
-    p = pd.Period(x[:7], "M")
-    return p.to_timestamp(how="end")
+    ym = x[:7]
+    p = pd.Period(ym, "M")
+    how = "start" if str(monthly_freq).upper() == "MS" else "end"
+    return p.to_timestamp(how=how)
 
 
 def _build_dummy_matrix(
@@ -20,21 +34,43 @@ def _build_dummy_matrix(
     covid_start: str,
     covid_end: str,
     separate: bool,
+    *,
+    monthly_freq: str = "MS",
 ) -> pd.DataFrame:
     """
     Build dummy matrix for the COVID window.
 
-    separate = False -> one 'covid' dummy (on/off in window)
-    separate = True  -> one dummy per month in the window
+    Parameters
+    ----------
+    idx : Index
+        Date index of the panel (monthly).
+    covid_start, covid_end : str
+        Covid window bounds, 'YYYY-MM' or 'YYYY-MM-DD'.
+    separate : bool
+        - False -> one 'covid' dummy (on/off in window)
+        - True  -> one dummy per month in the window
+    monthly_freq : {"MS", "ME"}, default "MS"
+        How to interpret covid_start/covid_end (month-start vs month-end).
+
+    Returns
+    -------
+    D : DataFrame
+        Dummy matrix aligned to idx.
     """
-    # Coerce to DatetimeIndex for date comparisons
     dt_idx = pd.DatetimeIndex(idx)
-    s = _ts_month_end(covid_start)
-    e = _ts_month_end(covid_end)
+    s = _ts_month_boundary(covid_start, monthly_freq=monthly_freq)
+    e = _ts_month_boundary(covid_end, monthly_freq=monthly_freq)
+
+    if s > e:
+        raise ValueError(f"covid_start {s.date()} > covid_end {e.date()}")
 
     if separate:
-        # Month-end dates over the window
-        months = pd.date_range(s, e, freq="M")
+        # Monthly dates over the window (respecting boundary choice)
+        # For month-start panels this will generate month-end, but we match by year/month,
+        # not by exact day, so it still selects the right rows.
+        months = pd.period_range(s, e, freq="M").to_timestamp(
+            how="start" if str(monthly_freq).upper() == "MS" else "end"
+        )
         cols = [f"covid_{d.strftime('%Y-%m')}" for d in months]
         D = pd.DataFrame(0.0, index=dt_idx, columns=cols)
         for d, col in zip(months, cols):
@@ -55,27 +91,54 @@ def residualize_on_dummy(
     covid_end: str,
     separate: bool = False,
     min_obs: int = 5,
+    *,
+    monthly_freq: str = "MS",
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Regress each series on [const, dummies] and subtract only the dummy component.
 
+    This can be applied to:
+      - an OOS panel, or
+      - a full standardized panel (train + OOS, e.g. 1990..end).
+
     Parameters
     ----------
-    X : DataFrame, standardized predictors (train or OOS).
-    covid_start, covid_end : 'YYYY-MM' or 'YYYY-MM-DD'
-    separate : use one dummy per month (True) or single on/off dummy (False)
-    min_obs : minimum non-NaN observations to run regression
+    X : DataFrame
+        Standardized predictors (any monthly panel with a DatetimeIndex).
+    covid_start, covid_end : str
+        'YYYY-MM' or 'YYYY-MM-DD'.
+    separate : bool, default False
+        If True, use a separate dummy for each month in the Covid window.
+        If False, use a single on/off dummy for the whole window.
+    min_obs : int, default 5
+        Minimum non-NaN observations to run regression for a series.
+    monthly_freq : {"MS", "ME"}, default "MS"
+        How to interpret covid_start/covid_end (month-start vs month-end).
 
     Returns
     -------
-    X_adj : DataFrame, same shape, with COVID dummy effect removed.
-    D     : DataFrame, dummy regressors used (for potential reuse / inspection).
+    X_adj : DataFrame
+        Same shape as X; Covid dummy component removed.
+    D : DataFrame
+        Dummy regressors used (for inspection or reuse).
     """
+    if X.empty:
+        raise ValueError("Input panel X is empty.")
+
     X = X.copy()
-    idx = X.index
+    dt_idx = pd.DatetimeIndex(X.index)
+    X.index = dt_idx  # normalize index type
 
-    D = _build_dummy_matrix(idx, covid_start, covid_end, separate=separate)
+    # Build dummy matrix aligned with X
+    D = _build_dummy_matrix(
+        dt_idx,
+        covid_start=covid_start,
+        covid_end=covid_end,
+        separate=separate,
+        monthly_freq=monthly_freq,
+    )
 
+    # Regress on [const, D]
     const = pd.Series(1.0, index=D.index, name="const")
     Z = pd.concat([const, D], axis=1).to_numpy(dtype=float)
 
@@ -85,15 +148,17 @@ def residualize_on_dummy(
         y = X[sname].to_numpy(dtype=float)
         m = ~np.isnan(y)
         if m.sum() < min_obs:
-            # too few points; leave as-is
+            # too few points; leave series as-is
             X_adj[sname] = X[sname]
             continue
 
         Zm, ym = Z[m], y[m]
         beta = np.linalg.pinv(Zm.T @ Zm) @ (Zm.T @ ym)
 
-        D_all = Z[:, 1:]               # drop const
-        X_adj[sname] = y - (D_all @ beta[1:])  # subtract dummy component only
+        # Drop const, keep only dummy regressors
+        D_all = Z[:, 1:]
+        # Subtract only the dummy component
+        X_adj[sname] = y - (D_all @ beta[1:])
 
     return X_adj, D
 
@@ -103,17 +168,36 @@ def apply_dummies_resid(
     covid_start: str,
     covid_end: str,
     separate: bool = False,
+    *,
+    monthly_freq: str = "MS",
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Convenience wrapper: dummy-residualize X and return (X_adj, D).
 
-    This is the natural implementation for 'covid_dummies' in make_train_oos_from_raw:
-    - Adjust predictors so that COVID dummy effect is removed.
-    - Optionally also include the dummy regressors D in the panel.
+    This is the natural implementation for a 'covid_dummies' correction:
+    - Adjust predictors so that the Covid dummy effect is removed.
+    - Optionally, the dummy regressors D can be added to the panel upstream.
+
+    Parameters
+    ----------
+    X : DataFrame
+        Standardized predictors (full panel or OOS).
+    covid_start, covid_end : str
+        'YYYY-MM' or 'YYYY-MM-DD'.
+    separate : bool, default False
+        Single dummy vs one-per-month.
+    monthly_freq : {"MS", "ME"}, default "MS"
+        How to interpret covid_start/covid_end.
+
+    Returns
+    -------
+    X_adj : DataFrame
+    D : DataFrame
     """
     return residualize_on_dummy(
         X,
         covid_start=covid_start,
         covid_end=covid_end,
         separate=separate,
+        monthly_freq=monthly_freq,
     )
