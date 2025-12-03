@@ -212,13 +212,6 @@ def main() -> None:
     # Batch mode
     # -------------------
     if batch_mode:
-        if args.all_specs:
-            spec_list = _load_all_specs(args.forecasts_long_csv)
-        else:
-            spec_list = _parse_specs(args.specs)
-            if not spec_list:
-                raise ValueError("--specs must be provided if --all-specs is not set in batch mode.")
-
         if args.all_horizons:
             horizon_list = [1, 2, 3]
         else:
@@ -228,7 +221,14 @@ def main() -> None:
         _ensure_dir(base_dir)
 
         if args.plot == "horizon_box":
-            # One plot per spec
+            # One plot per spec; horizons handled inside boxplot function
+            if args.all_specs:
+                spec_list = _load_all_specs(args.forecasts_long_csv)
+            else:
+                spec_list = _parse_specs(args.specs)
+                if not spec_list:
+                    raise ValueError("--specs must be provided for batch horizon_box if --all-specs is not set.")
+
             for spec in spec_list:
                 out_path = os.path.join(base_dir, f"horizon_box_{spec}.png")
                 fig, ax = plt.subplots(figsize=(8.0, 5.0))
@@ -239,6 +239,13 @@ def main() -> None:
 
         elif args.plot == "calibration":
             # Per (spec, horizon)
+            if args.all_specs:
+                spec_list = _load_all_specs(args.forecasts_long_csv)
+            else:
+                spec_list = _parse_specs(args.specs)
+                if not spec_list:
+                    raise ValueError("--specs must be provided for batch calibration if --all-specs is not set.")
+
             for h in horizon_list:
                 out_dir_h = os.path.join(base_dir, f"h{h}")
                 _ensure_dir(out_dir_h)
@@ -252,6 +259,13 @@ def main() -> None:
 
         elif args.plot == "rolling":
             # Per (spec, horizon)
+            if args.all_specs:
+                spec_list = _load_all_specs(args.forecasts_long_csv)
+            else:
+                spec_list = _parse_specs(args.specs)
+                if not spec_list:
+                    raise ValueError("--specs must be provided for batch rolling if --all-specs is not set.")
+
             for h in horizon_list:
                 out_dir_h = os.path.join(base_dir, f"h{h}")
                 _ensure_dir(out_dir_h)
@@ -274,6 +288,14 @@ def main() -> None:
                     plt.close(fig)
 
         elif args.plot == "subperiod_bars":
+            # One plot per horizon, all specs x all subperiods
+            if args.all_specs:
+                spec_list = _load_all_specs(args.forecasts_long_csv)
+            else:
+                spec_list = _parse_specs(args.specs)
+                if not spec_list:
+                    raise ValueError("--specs must be provided for batch subperiod_bars if --all-specs is not set.")
+
             for h in horizon_list:
                 out_path = os.path.join(base_dir, f"subperiod_bars_h{h}.png")
                 fig, ax = plt.subplots(figsize=(10.0, 5.0))
@@ -289,6 +311,14 @@ def main() -> None:
                 plt.close(fig)
 
         elif args.plot == "subperiod_heatmap":
+            # One heatmap per horizon, all specs x all subperiods
+            if args.all_specs:
+                spec_list = _load_all_specs(args.forecasts_long_csv)
+            else:
+                spec_list = _parse_specs(args.specs)
+                if not spec_list:
+                    raise ValueError("--specs must be provided for batch subperiod_heatmap if --all-specs is not set.")
+
             for h in horizon_list:
                 out_path = os.path.join(base_dir, f"subperiod_heatmap_h{h}.png")
                 fig, ax = plt.subplots(figsize=(10.0, 6.0))
@@ -304,6 +334,7 @@ def main() -> None:
                 plt.close(fig)
 
         elif args.plot == "complexity":
+            # One scatter per horizon, RMSE vs complexity across all specs
             for h in horizon_list:
                 out_path = os.path.join(base_dir, f"complexity_vs_rmse_h{h}.png")
                 fig, ax = plt.subplots(figsize=(7.0, 5.0))

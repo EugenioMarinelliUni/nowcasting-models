@@ -24,7 +24,6 @@ def compute_rmse_by_spec(
     d = d[d["horizon_in_quarter"] == horizon].copy()
     d = d.dropna(subset=["spec", "error"])
 
-    # Use named aggregation so the result is a proper DataFrame with 'rmse' column.
     grouped = (
         d.groupby("spec", as_index=False)
         .agg(rmse=("error", lambda x: (x**2).mean() ** 0.5))
@@ -41,46 +40,29 @@ def plot_complexity_vs_rmse(
     Scatter plot of model complexity vs RMSE (per spec) for a given horizon.
 
     Complexity = q * p, parsed from spec name 'q{q}_r{r}_p{p}'.
-    Color encodes q.
     """
     rmse_df = compute_rmse_by_spec(df_long, horizon=horizon)
     if rmse_df.empty:
         raise ValueError("No RMSE data available for any spec.")
 
     complexities: Dict[str, int] = {}
-    qs: Dict[str, int] = {}
     for spec in rmse_df["spec"]:
         q_val, p_val = parse_q_p_from_spec(spec)
         complexities[spec] = q_val * p_val
-        qs[spec] = q_val
 
     rmse_df["complexity"] = rmse_df["spec"].map(complexities)
-    rmse_df["q"] = rmse_df["spec"].map(qs)
 
     if ax is None:
         _, ax = plt.subplots(figsize=(7.0, 5.0))
 
-    unique_q = sorted(rmse_df["q"].dropna().unique())
-    color_map = {q: i for i, q in enumerate(unique_q)}
-    colors = [color_map.get(q, 0) for q in rmse_df["q"]]
-
     ax.scatter(
         rmse_df["complexity"],
         rmse_df["rmse"],
-        c=colors,
         s=25,
     )
 
     ax.set_xlabel("Complexity (q * p)")
     ax.set_ylabel(f"RMSE (horizon h{horizon})")
     ax.set_title("Complexity vs performance")
-
-    # Legend for q
-    handles = []
-    labels = []
-    for q in unique_q:
-        handles.append(ax.scatter([], [], c=[color_map[q]], s=25))
-        labels.append(f"q={q}")
-    ax.legend(handles, labels, title="q", loc="best")
 
     return ax
