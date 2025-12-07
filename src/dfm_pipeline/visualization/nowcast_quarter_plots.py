@@ -7,6 +7,7 @@ from typing import Iterable, Optional
 
 import os
 
+import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
@@ -233,3 +234,133 @@ def save_four_dots_plot_for_specs(
         fig.tight_layout()
         fig.savefig(out_path, dpi=150)
         plt.close(fig)
+
+
+def plot_quarter_nowcasts_multi_panel(
+    df_all: pd.DataFrame,
+    *,
+    model_col: str = "model",
+    horizon_col: str = "month_in_quarter",
+    y_real_col: str = "y_real_Q",
+    y_hat_col: str = "y_hat",
+    ax: Optional[plt.Axes] = None,
+) -> plt.Axes:
+    """
+    Plot, for each quarter, 3x3 nowcasts (3 models x 3 horizons) as dots,
+    plus the actual value.
+
+    Expected columns in df_all:
+      - 'year', 'quarter'
+      - model_col: identifies panel/model ('full', 'stab', 'vote', ...)
+      - horizon_col: 1,2,3 (month-in-quarter or horizon index)
+      - y_real_col: actual quarterly target (same for all rows of that quarter)
+      - y_hat_col: nowcast
+
+    df_all should already be filtered to a single (q,p) specification per model.
+    """
+    if ax is None:
+        _, ax = plt.subplots(figsize=(12.0, 5.0))
+
+    required = {"year", "quarter", model_col, horizon_col, y_real_col, y_hat_col}
+    missing = required.difference(df_all.columns)
+    if missing:
+        raise ValueError(f"df_all is missing required columns: {missing}")
+
+    df_all = df_all.copy()
+
+    # Sort and build integer quarter index for x-axis
+    df_all = df_all.sort_values(["year", "quarter", horizon_col, model_col])
+    uq = df_all[["year", "quarter"]].drop_duplicates().reset_index(drop=True)
+    uq["q_idx"] = np.arange(len(uq))
+    df_all = df_all.merge(uq, on=["year", "quarter"], how="left")
+
+    # Model and horizon ordering
+    model_order = sorted(df_all[model_col].unique())
+    horizons = sorted(df_all[horizon_col].unique())
+
+    # Colors by model, markers by horizon
+    default_colors = plt.rcParams["axes.prop_cycle"].by_key().get("color", [])
+    color_map = {m: default_colors[i % len(default_colors)] for i, m in enumerate(model_order)}
+    marker_map = {
+        h: mk
+        for h, mk in zip(
+            horizons,
+            ["o", "s", "^", "D", "v"],  # up to 5 horizons if ever needed
+        )
+    }
+
+    # Offsets so points don't overlap exactly
+    if len(model_order) > 1:
+        base_offsets = np.linspace(-0.25, 0.25, len(model_order))
+    else:
+        base_offsets = [0.0]
+    model_offset = {m: base_offsets[i] for i, m in enumerate(model_order)}
+
+    horiz_jitter = {h: (h - np.mean(horizons)) * 0.03 for h in horizons}
+
+    # Scatter for all model × horizon combos
+    for m in model_order:
+        for h in horizons:
+            sub = df_all[(df_all[model_col] == m) & (df_all[horizon_col] == h)]
+            if sub.empty:
+                continue
+            x = sub["q_idx"] + model_offset[m] + horiz_jitter[h]
+            y = sub[y_hat_col]
+            ax.scatter(
+                x,
+                y,
+                s=20,
+                color=color_map[m],
+                marker=marker_map.get(h, "o"),
+                alpha=0.8,
+                label=f"{m}, h{h}",
+            )
+
+    # Actual values: one per quarter
+    actual = (
+        df_all[["q_idx", "year", "quarter", y_real_col]]
+        .drop_duplicates(subset=["year", "quarter"])
+        .sort_values("q_idx")
+    )
+    ax.scatter(
+        actual["q_idx"],
+        actual[y_real_col],
+        s=30,
+        color="black",
+        marker="x",
+        label="actual",
+    )
+
+    # x-axis tick labels as year-quarter (sparse)
+    tick_idx = actual["q_idx"].to_numpy()
+    tick_labels = actual.apply(
+        lambda r: f"{int(r['year'])}Q{int(r['quarter'])}", axis=1
+    ).to_numpy()
+
+    if len(tick_idx) > 20:
+        step = max(1, len(tick_idx) // 20)
+    else:
+        step = 1
+
+    ax.set_xticks(tick_idx[::step])
+    ax.set_xticklabels(tick_labels[::step], rotation=45, ha="right")
+
+    ax.set_xlabel("Quarter")
+    ax.set_ylabel("Standardized target")
+    ax.set_title("Nowcasts (models x horizons) vs actual per quarter")
+
+    # De-duplicate legend entries
+    handles, labels = ax.get_legend_handles_labels()
+    seen = set()
+    new_handles, new_labels = [], []
+    for h, lab in zip(handles, labels):
+        if lab in seen:
+            continue
+        seen.add(lab)
+        new_handles.append(h)
+        new_labels.append(lab)
+    ax.legend(new_handles, new_labels, loc="best", fontsize=8, ncol=3)
+
+    ax.grid(True, axis="y", alpha=0.2)
+
+    return ax
