@@ -136,11 +136,15 @@ def _kalman_filter_smoother_numba(Y, T_mat, Q_mat, C_mat, R_meas, a0, P0):
     eye_m = np.eye(m)
     eps_reg = 1e-6
 
-    # forward filter
+    # forward filter (standard initialization)
+    # t=0 uses prior (a0, P0) for alpha_0, then updates with y_0.
     for t in range(T):
-        # prediction
-        a_pred = T_mat @ a_prev
-        P_pred_t = T_mat @ P_prev @ T_mat.T + Q_mat
+        if t == 0:
+            a_pred = a_prev
+            P_pred_t = P_prev
+        else:
+            a_pred = T_mat @ a_prev
+            P_pred_t = T_mat @ P_prev @ T_mat.T + Q_mat
 
         y_t = Y[t]
 
@@ -162,7 +166,10 @@ def _kalman_filter_smoother_numba(Y, T_mat, Q_mat, C_mat, R_meas, a0, P0):
             K_t = P_pred_t @ C_t.T @ S_inv
 
             a_filt_t = a_pred + K_t @ v_t
+            # Joseph form is slower; keep the basic update but enforce symmetry.
             P_filt_t = (eye_m - K_t @ C_t) @ P_pred_t
+            # symmetrize
+            P_filt_t = 0.5 * (P_filt_t + P_filt_t.T)
 
             # loglik contribution
             diag_L = np.empty(k)
@@ -178,6 +185,7 @@ def _kalman_filter_smoother_numba(Y, T_mat, Q_mat, C_mat, R_meas, a0, P0):
         else:
             a_filt_t = a_pred
             P_filt_t = P_pred_t
+            P_filt_t = 0.5 * (P_filt_t + P_filt_t.T)
 
         alpha_pred[t] = a_pred
         P_pred[t] = P_pred_t
@@ -197,9 +205,11 @@ def _kalman_filter_smoother_numba(Y, T_mat, Q_mat, C_mat, R_meas, a0, P0):
 
     for t in range(T - 2, -1, -1):
         P_pred_next = P_pred[t + 1]
-        P_pred_next_inv = np.linalg.inv(P_pred_next)  # assumes PSD
 
-        J_t = P_filt[t] @ T_mat.T @ P_pred_next_inv
+        # J_t = P_filt[t] T' P_pred[t+1]^{-1}, compute via solve instead of explicit inverse
+        M = P_filt[t] @ T_mat.T
+        # solve(P_pred_next.T, M.T).T is equivalent to M @ inv(P_pred_next)
+        J_t = np.linalg.solve(P_pred_next.T, M.T).T
 
         alpha_smooth[t] = alpha_filt[t] + J_t @ (
             alpha_smooth[t + 1] - alpha_pred[t + 1]
@@ -208,6 +218,7 @@ def _kalman_filter_smoother_numba(Y, T_mat, Q_mat, C_mat, R_meas, a0, P0):
             P_filt[t]
             + J_t @ (P_smooth[t + 1] - P_pred[t + 1]) @ J_t.T
         )
+        P_smooth[t] = 0.5 * (P_smooth[t] + P_smooth[t].T)
         P_lag[t + 1] = P_smooth[t + 1] @ J_t.T
 
     return alpha_smooth, P_smooth, P_lag, loglik
@@ -234,8 +245,12 @@ def _kalman_filter_only_numba(Y, T_mat, Q_mat, C_mat, R_meas, a0, P0):
     eps_reg = 1e-6
 
     for t in range(T):
-        a_pred = T_mat @ a_prev
-        P_pred_t = T_mat @ P_prev @ T_mat.T + Q_mat
+        if t == 0:
+            a_pred = a_prev
+            P_pred_t = P_prev
+        else:
+            a_pred = T_mat @ a_prev
+            P_pred_t = T_mat @ P_prev @ T_mat.T + Q_mat
 
         y_t = Y[t]
 
@@ -257,9 +272,11 @@ def _kalman_filter_only_numba(Y, T_mat, Q_mat, C_mat, R_meas, a0, P0):
 
             a_filt_t = a_pred + K_t @ v_t
             P_filt_t = (eye_m - K_t @ C_t) @ P_pred_t
+            P_filt_t = 0.5 * (P_filt_t + P_filt_t.T)
         else:
             a_filt_t = a_pred
             P_filt_t = P_pred_t
+            P_filt_t = 0.5 * (P_filt_t + P_filt_t.T)
 
         alpha_filt[t] = a_filt_t
         P_filt[t] = P_filt_t

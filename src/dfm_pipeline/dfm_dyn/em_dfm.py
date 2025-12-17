@@ -52,8 +52,9 @@ def _init_from_pca(
     inds = np.where(np.isnan(X_filled))
     X_filled[inds] = np.take(col_means, inds[1])
 
-    # static PCA
-    U, s, Vt = np.linalg.svd(X_filled, full_matrices=False)
+    # static PCA (center after mean-imputation)
+    Xc = X_filled - X_filled.mean(axis=0, keepdims=True)
+    U, s, Vt = np.linalg.svd(Xc, full_matrices=False)
     F_init = U[:, :r] * s[:r]           # (T, r)
     Lambda_init = Vt[:r, :].T           # (n, r)
 
@@ -96,7 +97,7 @@ def _init_from_pca(
 
     # idiosyncratic R from PCA residuals
     X_hat = F_init @ Lambda_init.T
-    E = X_filled - X_hat
+    E = Xc - X_hat
 
     if diag_R:
         R_diag = np.var(E, axis=0, ddof=1)
@@ -111,6 +112,57 @@ def _init_from_pca(
     return Phi_list, Q_u, Lambda_init, R
 
 
+def _spectral_radius(A: np.ndarray) -> float:
+    """Spectral radius (max |eigenvalue|) for a square matrix."""
+    if A.size == 0:
+        return 0.0
+    eigvals = np.linalg.eigvals(A)
+    return float(np.max(np.abs(eigvals)))
+
+
+def _stabilize_var_companion(
+    Phi_list: List[np.ndarray],
+    Q_u: np.ndarray,
+    max_radius: float = 0.995,
+    max_tries: int = 20,
+) -> tuple[List[np.ndarray], np.ndarray]:
+    """Shrink factor VAR coefficients if the companion matrix is unstable.
+
+    EM M-steps can produce an unstable VAR(p). For forecasting, this is usually
+    undesirable (exploding factor dynamics). A lightweight stabilization is:
+        - build companion matrix
+        - if spectral radius > max_radius, scale all Phi_j by a constant factor
+          until stability.
+
+    This is a pragmatic guardrail (not a constrained M-step).
+    """
+    if not Phi_list:
+        return Phi_list, Q_u
+
+    # Symmetrize / floor Q_u to be PSD-ish
+    Q_u = 0.5 * (Q_u + Q_u.T)
+    w = np.linalg.eigvalsh(Q_u)
+    if float(np.min(w)) < 1e-10:
+        Q_u = Q_u + (1e-10 - float(np.min(w))) * np.eye(Q_u.shape[0])
+
+    T_comp, _ = build_companion_transition(Phi_list, Q_u)
+    rad = _spectral_radius(T_comp)
+    if not np.isfinite(rad) or rad <= max_radius:
+        return Phi_list, Q_u
+
+    # Shrink Phi blocks until stable.
+    scale = max_radius / (rad + 1e-12)
+    scale = float(np.clip(scale, 0.0, 0.999))
+    Phi_new = [scale * Phi for Phi in Phi_list]
+
+    for _ in range(max_tries):
+        T_comp, _ = build_companion_transition(Phi_new, Q_u)
+        rad = _spectral_radius(T_comp)
+        if np.isfinite(rad) and rad <= max_radius:
+            return Phi_new, Q_u
+        Phi_new = [0.98 * Phi for Phi in Phi_new]
+
+    return Phi_new, Q_u
 def em_dfm_full(
     X: np.ndarray,
     r: int,
@@ -226,6 +278,9 @@ def em_dfm_full(
             Phi_list = new_Phi_list
             Q_u = Q_un[:r, :r]
             Q_u = (Q_u + Q_u.T) / 2.0
+
+            # Stability guard: shrink VAR coefficients if companion dynamics are unstable.
+            Phi_list, Q_u = _stabilize_var_companion(Phi_list, Q_u, max_radius=0.995)
 
             # Rebuild canonical state-space
             T_mat, Q = build_companion_transition(Phi_list, Q_u)
