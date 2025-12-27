@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 from pathlib import Path
 import sys
 import pandas as pd
@@ -24,8 +25,6 @@ def load_transformed_panel(csv_path: Path, date_col: str = "sasdate") -> pd.Data
     """
     df = pd.read_csv(csv_path, low_memory=False)
 
-    # Prefer the provided date_col if present; otherwise heuristically
-    # detect whether the first column is date-like.
     if date_col not in df.columns:
         first = df.columns[0]
         s_dates = pd.to_datetime(df[first], errors="coerce")
@@ -44,6 +43,82 @@ def load_transformed_panel(csv_path: Path, date_col: str = "sasdate") -> pd.Data
     df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
     df = df.dropna(subset=[date_col]).set_index(df[date_col].name).sort_index()
     return df.select_dtypes(include="number")
+
+
+def _ensure_parent(p: Path) -> None:
+    p.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _tag_from_window(train_start: str, train_end: str, *, granularity: str) -> str:
+    s = pd.to_datetime(train_start)
+    e = pd.to_datetime(train_end)
+    if granularity == "years":
+        return f"train{s.year:04d}_{e.year:04d}"
+    if granularity == "ym":
+        return f"train{s.year:04d}_{s.month:02d}_{e.year:04d}_{e.month:02d}"
+    if granularity == "ymd":
+        return (
+            f"train{s.year:04d}_{s.month:02d}_{s.day:02d}_"
+            f"{e.year:04d}_{e.month:02d}_{e.day:02d}"
+        )
+    raise ValueError(f"Unsupported granularity={granularity!r}")
+
+
+@dataclass(frozen=True)
+class OutputPlan:
+    out_full: Path
+    out_train: Path | None
+    out_oos: Path | None
+    stats_path: Path | None
+
+
+def _resolve_outputs(args: argparse.Namespace) -> OutputPlan:
+    """
+    Output logic:
+    - If --out-dir is provided, the script constructs a subfolder based on train window
+      and generates descriptive filenames. Parent dirs are created on write.
+    - Otherwise, it uses --out-full/--out-train/--out-oos as provided.
+    """
+    if args.out_dir:
+        out_dir = Path(args.out_dir)
+        if not args.panel_id:
+            raise ValueError("--panel-id is required when using --out-dir")
+
+        tag = _tag_from_window(args.train_start, args.train_end, granularity=args.subdir_granularity)
+        base = out_dir / tag
+
+        out_full = base / f"X_panel_z__{args.panel_id}__{tag}.csv"
+
+        out_train = None
+        if args.write_splits:
+            out_train = base / f"X_panel_z__{args.panel_id}__{tag}__train.csv"
+
+        out_oos = None
+        if args.write_splits:
+            oos_start = pd.to_datetime(args.oos_start)
+            oos_end = pd.to_datetime(args.oos_end) if args.oos_end else None
+            if oos_end is None:
+                oos_tag = f"oos{oos_start.year:04d}_{oos_start.month:02d}_end"
+            else:
+                oos_tag = f"oos{oos_start.year:04d}_{oos_start.month:02d}_{oos_end.year:04d}_{oos_end.month:02d}"
+            out_oos = base / f"X_panel_z__{args.panel_id}__{tag}__{oos_tag}.csv"
+
+        stats_path = None
+        if args.save_stats:
+            stats_path = base / f"X_panel_z__{args.panel_id}__{tag}__train_stats.csv"
+
+        return OutputPlan(out_full=out_full, out_train=out_train, out_oos=out_oos, stats_path=stats_path)
+
+    # Backward-compatible explicit outputs
+    out_full = Path(args.out_full)
+    out_train = Path(args.out_train) if args.out_train else None
+    out_oos = Path(args.out_oos) if args.out_oos else None
+
+    stats_path = None
+    if args.save_stats:
+        stats_path = out_full.with_suffix("").with_name(out_full.stem + "__train_stats.csv")
+
+    return OutputPlan(out_full=out_full, out_train=out_train, out_oos=out_oos, stats_path=stats_path)
 
 
 def parse_args() -> argparse.Namespace:
@@ -96,37 +171,75 @@ def parse_args() -> argparse.Namespace:
         default=1,
         help="Drop columns with fewer than this many non-missing obs in the training window.",
     )
+
+    # New: directory-based output mode (auto subfolder + descriptive names)
+    ap.add_argument(
+        "--out-dir",
+        default="",
+        help=(
+            "If provided, store artifacts under --out-dir/<train-tag>/ with descriptive filenames. "
+            "Overrides the need to manually create parent directories. Requires --panel-id."
+        ),
+    )
+    ap.add_argument(
+        "--panel-id",
+        default="",
+        help="Panel identifier used in generated filenames when using --out-dir (e.g. 1960_noVIX).",
+    )
+    ap.add_argument(
+        "--subdir-granularity",
+        default="ym",
+        choices=["years", "ym", "ymd"],
+        help="Train subfolder tag granularity: years|ym|ymd. Default: ym.",
+    )
+    ap.add_argument(
+        "--write-splits",
+        action="store_true",
+        help="If set with --out-dir, also write train and OOS split files into the same subfolder.",
+    )
+
+    # Backward-compatible explicit outputs
     ap.add_argument(
         "--out-full",
-        required=True,
-        help="Output CSV for full standardized panel (from train-start to end).",
+        required=False,
+        default="",
+        help="Output CSV for full standardized panel (from train-start to end). Ignored if --out-dir is used.",
     )
     ap.add_argument(
         "--out-train",
         required=False,
-        help="Optional output CSV for standardized training subpanel.",
+        default="",
+        help="Optional output CSV for standardized training subpanel. Ignored if --out-dir is used.",
     )
     ap.add_argument(
         "--out-oos",
         required=False,
-        help="Optional output CSV for standardized OOS subpanel.",
+        default="",
+        help="Optional output CSV for standardized OOS subpanel. Ignored if --out-dir is used.",
     )
     ap.add_argument(
         "--save-stats",
         action="store_true",
-        help="If set, write μ,σ,nobs CSV next to --out-full.",
+        help="If set, write μ,σ,nobs CSV next to the outputs (or into the train-tag subfolder when using --out-dir).",
     )
-    return ap.parse_args()
+
+    args = ap.parse_args()
+
+    # Enforce output mode requirements
+    if not args.out_dir:
+        if not args.out_full:
+            raise SystemExit("Either --out-dir (recommended) or --out-full must be provided.")
+    return args
 
 
 def main() -> None:
     args = parse_args()
+    plan = _resolve_outputs(args)
 
     csv_path = Path(args.csv)
     X_raw = load_transformed_panel(csv_path, date_col=args.date_col)
 
     # 1) Full standardization with frozen train scalers
-    #    This computes μ,σ on [train-start, train-end] and applies them to all dates in X_raw.
     Z_full_all, stats = standardize_full_panel_on_window(
         X_raw,
         start=args.train_start,
@@ -135,48 +248,45 @@ def main() -> None:
         min_obs_per_col=int(args.min_obs_per_col),
     )
 
-    # 2) Restrict the standardized panel to [train-start, end-of-sample]
-    #    We explicitly drop any pre-1990 rows as requested.
+    # 2) Trim to [train-start, end-of-sample]
     Z_full = Z_full_all.loc[args.train_start:].copy()
 
-    # 3) Write full standardized panel (train + OOS, starting at train-start)
-    out_full = Path(args.out_full)
-    out_full.parent.mkdir(parents=True, exist_ok=True)
+    # 3) Write full standardized panel
     df_full = Z_full.copy()
     df_full.insert(0, "date", df_full.index)
-    df_full.to_csv(out_full, index=False)
-    print(f"[OK] wrote full standardized panel: {out_full}  shape={df_full.shape}")
 
-    # 4) Optional train/OOS splits based on index (within the trimmed Z_full)
+    _ensure_parent(plan.out_full)
+    df_full.to_csv(plan.out_full, index=False)
+    print(f"[OK] wrote full standardized panel: {plan.out_full}  shape={df_full.shape}")
+
+    # 4) Optional train/OOS splits
     oos_end_str: str = args.oos_end or str(Z_full.index.max().date())
     train_slice = slice(args.train_start, args.train_end)
     oos_slice = slice(args.oos_start, oos_end_str)
 
-    if args.out_train:
+    if plan.out_train is not None:
         Z_train = Z_full.loc[train_slice].copy()
-        out_train = Path(args.out_train)
-        out_train.parent.mkdir(parents=True, exist_ok=True)
         df_train = Z_train.copy()
         df_train.insert(0, "date", df_train.index)
-        df_train.to_csv(out_train, index=False)
-        print(f"[OK] wrote standardized training panel: {out_train}  shape={df_train.shape}")
+        _ensure_parent(plan.out_train)
+        df_train.to_csv(plan.out_train, index=False)
+        print(f"[OK] wrote standardized training panel: {plan.out_train}  shape={df_train.shape}")
 
-    if args.out_oos:
+    if plan.out_oos is not None:
         Z_oos = Z_full.loc[oos_slice].copy()
-        out_oos = Path(args.out_oos)
-        out_oos.parent.mkdir(parents=True, exist_ok=True)
         df_oos = Z_oos.copy()
         df_oos.insert(0, "date", df_oos.index)
-        df_oos.to_csv(out_oos, index=False)
-        print(f"[OK] wrote standardized OOS panel: {out_oos}  shape={df_oos.shape}")
+        _ensure_parent(plan.out_oos)
+        df_oos.to_csv(plan.out_oos, index=False)
+        print(f"[OK] wrote standardized OOS panel: {plan.out_oos}  shape={df_oos.shape}")
 
     # 5) Optional stats (μ,σ,nobs for the training window)
-    if args.save_stats:
-        st_path = out_full.with_suffix("").with_name(out_full.stem + "__train_stats.csv")
-        pd.DataFrame(
-            {"mean": stats.mean, "std": stats.std, "nobs": stats.nobs}
-        ).to_csv(st_path, index_label="series")
-        print(f"[OK] wrote train stats: {st_path}")
+    if plan.stats_path is not None:
+        _ensure_parent(plan.stats_path)
+        pd.DataFrame({"mean": stats.mean, "std": stats.std, "nobs": stats.nobs}).to_csv(
+            plan.stats_path, index_label="series"
+        )
+        print(f"[OK] wrote train stats: {plan.stats_path}")
 
 
 if __name__ == "__main__":

@@ -1,3 +1,4 @@
+# scripts/realtime/make_train_oos_from_raw.py
 #!/usr/bin/env python3
 from __future__ import annotations
 
@@ -5,13 +6,13 @@ import argparse
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional, Tuple
 
 import pandas as pd
 
 from src.dfm_pipeline.covid.covid_make_delete_weights import apply_delete_nan
-from src.dfm_pipeline.covid.covid_make_dummies_resid import apply_dummies_resid
-from src.dfm_pipeline.covid.covid_make_winsorized import apply_winsor_sigma
+from src.dfm_pipeline.covid.methods import variant_iqd_outliers_to_nan
+from src.dfm_pipeline.covid.spec import CovidSpec, parse_window
 
 
 # --------------------------------------------------------------------
@@ -66,12 +67,6 @@ def ensure_dir(p: Path) -> None:
 
 
 def load_vars_json(path: str) -> list[str]:
-    """
-    Accepts:
-      - ["var1", "var2", ...]
-      - {"selected": ["var1", "var2"]}
-      - {"var1": true, "var2": false, ...}
-    """
     obj = json.loads(Path(path).read_text(encoding="utf-8"))
     if isinstance(obj, list):
         return list(obj)
@@ -87,7 +82,6 @@ def compute_scaler(X: pd.DataFrame) -> Dict[str, Dict[str, float]]:
     for col in X.columns:
         s = X[col]
         mu = float(s.mean())
-        # ddof=0 -> population std (N in denominator)
         sigma = float(s.std(ddof=0))
         if sigma == 0.0 or pd.isna(sigma):
             sigma = 1.0
@@ -119,7 +113,14 @@ class OOSInfo:
     covid_policy: str
     covid_start: str
     covid_end: str
-    winsor_q: float
+    monthly_freq: str
+    lm_outliers_c: float
+    lm_outliers_min_obs: int
+    lm_outliers_fit_window: str
+
+
+def _parse_window(s: Optional[str]) -> Optional[Tuple[str, str]]:
+    return parse_window(s)
 
 
 def apply_covid_policy_to_oos(
@@ -127,14 +128,17 @@ def apply_covid_policy_to_oos(
     policy: str,
     covid_start: str,
     covid_end: str,
-    winsor_q: float,
+    monthly_freq: str,
+    lm_outliers_c: float,
+    lm_outliers_min_obs: int,
+    lm_outliers_fit_window: Tuple[str, str],
 ) -> pd.DataFrame:
     """
     Apply covid-policy to standardized OOS predictors only.
 
-    covid_delete  -> set X to NaN in [covid_start, covid_end]
-    covid_dummies -> residualize on COVID dummy(s) (currently single dummy)
-    covid_winsor  -> clip X in [covid_start, covid_end] to +/- winsor_q (sigma)
+    none        -> no change
+    covid_delete-> set X to NaN in [covid_start, covid_end]
+    lm_outliers -> IQD outliers -> NaN, thresholds fit on fit_window, applied on covid window
     """
     if X_oos.empty:
         return X_oos
@@ -145,25 +149,24 @@ def apply_covid_policy_to_oos(
     if policy == "covid_delete":
         return apply_delete_nan(X_oos, covid_start=covid_start, covid_end=covid_end)
 
-    if policy == "covid_dummies":
-        X_adj, D = apply_dummies_resid(
-            X_oos,
+    if policy == "lm_outliers":
+        spec = CovidSpec(
             covid_start=covid_start,
             covid_end=covid_end,
-            separate=False,  # set True if you ever want monthly dummies
+            monthly_freq=monthly_freq,
+            fit_window=lm_outliers_fit_window,
+            apply_window=(covid_start, covid_end),
+            allow_leakage=False,
         )
-        # If you want explicit dummy regressors in the panel, uncomment:
-        # X_adj = pd.concat([X_adj, D], axis=1)
-        return X_adj
-
-    if policy == "covid_winsor":
-        # winsor_q used here as symmetric sigma threshold
-        return apply_winsor_sigma(
+        res = variant_iqd_outliers_to_nan(
             X_oos,
-            covid_start=covid_start,
-            covid_end=covid_end,
-            clip_sigma=winsor_q,
+            spec,
+            c=float(lm_outliers_c),
+            min_obs=int(lm_outliers_min_obs),
+            fit_window=lm_outliers_fit_window,
+            apply_window=(covid_start, covid_end),
         )
+        return res.X
 
     raise ValueError(f"Unknown covid_policy={policy!r}")
 
@@ -174,65 +177,46 @@ def apply_covid_policy_to_oos(
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(
-        description="Build standardized train/OOS panels with frozen scalers."
-    )
+    ap = argparse.ArgumentParser(description="Build standardized train/OOS panels with frozen scalers.")
 
-    # core inputs
     ap.add_argument("--panel-name", required=True, help="Logical panel id, e.g. 1960_noVIX.")
-    ap.add_argument(
-        "--panel-csv",
-        required=True,
-        help="Path to raw/stationarity-treated panel CSV (monthly).",
-    )
+    ap.add_argument("--panel-csv", required=True, help="Path to raw/stationarity-treated panel CSV (monthly).")
     ap.add_argument("--y-name", required=True, help="Logical target id, e.g. gdp_A191RL1Q225SBEA.")
-    ap.add_argument(
-        "--target-csv",
-        required=True,
-        help="Path to raw target CSV (quarterly or monthly).",
-    )
+    ap.add_argument("--target-csv", required=True, help="Path to raw target CSV (quarterly or monthly).")
 
     ap.add_argument("--train-start", required=True, help="YYYY-MM-01")
     ap.add_argument("--train-end", required=True, help="YYYY-MM-01")
 
-    # preselection (kept only for backward compatibility; you’ll filter later)
     ap.add_argument(
         "--vars-json",
         default="",
         help="Optional JSON with selected variables (list / {'selected': ...} / {var: bool}).",
     )
 
-    # COVID policy on OOS predictors
+    ap.add_argument("--monthly-freq", default="MS", choices=["MS", "ME"], help="Monthly convention (default MS).")
+
     ap.add_argument(
         "--covid-policy",
-        choices=["none", "covid_delete", "covid_dummies", "covid_winsor"],
+        choices=["none", "covid_delete", "lm_outliers"],
         default="none",
-        help="How to treat predictors in the COVID window in the OOS panel.",
+        help="How to treat predictors in the Covid window in the OOS panel.",
     )
+    ap.add_argument("--covid-start", default="2020-03-01", help="Start of Covid window.")
+    ap.add_argument("--covid-end", default="2021-12-01", help="End of Covid window.")
+
+    ap.add_argument("--lm-outliers-c", type=float, default=4.0, help="c in abs(x-median) > c*IQD.")
+    ap.add_argument("--lm-outliers-min-obs", type=int, default=20, help="Min obs in fit window.")
     ap.add_argument(
-        "--covid-start",
-        default="2020-03-01",
-        help="Start of COVID window (YYYY-MM-01).",
-    )
-    ap.add_argument(
-        "--covid-end",
-        default="2021-12-01",
-        help="End of COVID window (YYYY-MM-01).",
-    )
-    ap.add_argument(
-        "--winsor-q",
-        type=float,
-        default=6.0,
-        help="For covid_winsor: symmetric sigma clip threshold (legacy name).",
+        "--lm-outliers-fit-window",
+        default="",
+        help="Optional fit window 'YYYY-MM-DD,YYYY-MM-DD'. If omitted, defaults to train-start/train-end.",
     )
 
     args = ap.parse_args()
 
-    # load panel + target (full, no intersection)
-    panel = read_panel(args.panel_csv)      # full monthly X
-    y_raw = read_target(args.target_csv)    # full target (quarterly or monthly)
+    panel = read_panel(args.panel_csv)
+    y_raw = read_target(args.target_csv)
 
-    # optional variable preselection on panel only
     if args.vars_json:
         sel = load_vars_json(args.vars_json)
         missing = [v for v in sel if v not in panel.columns]
@@ -240,22 +224,16 @@ def main() -> None:
             raise ValueError(f"vars-json references missing columns: {missing[:5]}...")
         panel = panel[sel]
 
-    # train / oos split:
-    # - panel: purely by monthly panel dates
-    # - target: purely by target dates
     panel_train = clip_window(panel, args.train_start, args.train_end)
     y_train = clip_window(y_raw, args.train_start, args.train_end)
 
     train_end_ts = pd.to_datetime(args.train_end)
-    # everything after train_end is OOS, separately for X and y
     panel_oos = panel.loc[panel.index > train_end_ts]
     y_oos = y_raw.loc[y_raw.index > train_end_ts]
 
-    # build DataFrames for y explicitly (avoid .to_frame warnings)
     y_train_df = pd.DataFrame({args.y_name: y_train})
     y_oos_df = pd.DataFrame({args.y_name: y_oos})
 
-    # scalers from train window only
     X_scaler = compute_scaler(panel_train)
     y_scaler = compute_scaler(y_train_df)
 
@@ -264,16 +242,21 @@ def main() -> None:
     y_train_std = apply_scaler(y_train_df, y_scaler).iloc[:, 0]
     y_oos_std = apply_scaler(y_oos_df, y_scaler).iloc[:, 0]
 
-    # apply covid-policy to standardized OOS predictors only
+    fit_w = _parse_window(args.lm_outliers_fit_window) if args.lm_outliers_fit_window else None
+    if fit_w is None:
+        fit_w = (args.train_start, args.train_end)
+
     X_oos_std = apply_covid_policy_to_oos(
         X_oos_std,
         policy=args.covid_policy,
         covid_start=args.covid_start,
         covid_end=args.covid_end,
-        winsor_q=args.winsor_q,
+        monthly_freq=args.monthly_freq,
+        lm_outliers_c=float(args.lm_outliers_c),
+        lm_outliers_min_obs=int(args.lm_outliers_min_obs),
+        lm_outliers_fit_window=fit_w,
     )
 
-    # paths and spans
     train_span = fmt_span_from_strings(args.train_start, args.train_end)
     oos_span = fmt_span_from_index(panel_oos.index) if not panel_oos.empty else None
 
@@ -287,38 +270,26 @@ def main() -> None:
     ensure_dir(y_root)
 
     train_panel_path = train_dir / f"{args.panel_name}__train_{train_span}.csv"
-    oos_panel_path = (
-        oos_dir / f"{args.panel_name}__oos_{oos_span}.csv" if oos_span is not None else None
-    )
+    oos_panel_path = oos_dir / f"{args.panel_name}__oos_{oos_span}.csv" if oos_span is not None else None
 
     train_scaler_path = train_dir / f"{args.panel_name}__train_scaler.json"
     oos_info_path = oos_dir / f"{args.panel_name}__oos_info.json"
 
     y_train_path = y_root / f"{args.y_name}__train_{train_span}.csv"
-    y_oos_path = (
-        y_root / f"{args.y_name}__oos_{oos_span}.csv" if oos_span is not None else None
-    )
+    y_oos_path = y_root / f"{args.y_name}__oos_{oos_span}.csv" if oos_span is not None else None
     y_scaler_path = y_root / f"{args.y_name}__scaler.json"
 
-    # write X train / OOS
     X_train_std.to_csv(train_panel_path, index_label="Date")
     if oos_panel_path is not None and not X_oos_std.empty:
         X_oos_std.to_csv(oos_panel_path, index_label="Date")
 
-    # write y train / OOS
     y_train_std.to_frame(args.y_name).to_csv(y_train_path, index_label="Date")
     if y_oos_path is not None and not y_oos_std.empty:
         y_oos_std.to_frame(args.y_name).to_csv(y_oos_path, index_label="Date")
 
-    # write scalers
-    Path(train_scaler_path).write_text(
-        json.dumps(X_scaler, indent=2, sort_keys=True), encoding="utf-8"
-    )
-    Path(y_scaler_path).write_text(
-        json.dumps(y_scaler, indent=2, sort_keys=True), encoding="utf-8"
-    )
+    Path(train_scaler_path).write_text(json.dumps(X_scaler, indent=2, sort_keys=True), encoding="utf-8")
+    Path(y_scaler_path).write_text(json.dumps(y_scaler, indent=2, sort_keys=True), encoding="utf-8")
 
-    # derive oos_start / oos_end strings from X_oos_std index
     if X_oos_std.empty:
         oos_start_str: str | None = None
         oos_end_str: str | None = None
@@ -328,7 +299,6 @@ def main() -> None:
         oos_start_str = oos_start_ts.strftime("%Y-%m-%d")
         oos_end_str = oos_end_ts.strftime("%Y-%m-%d")
 
-    # OOS info
     oos_info = OOSInfo(
         panel_name=args.panel_name,
         y_name=args.y_name,
@@ -339,20 +309,17 @@ def main() -> None:
         covid_policy=args.covid_policy,
         covid_start=args.covid_start,
         covid_end=args.covid_end,
-        winsor_q=float(args.winsor_q),
+        monthly_freq=args.monthly_freq,
+        lm_outliers_c=float(args.lm_outliers_c),
+        lm_outliers_min_obs=int(args.lm_outliers_min_obs),
+        lm_outliers_fit_window=f"{fit_w[0]},{fit_w[1]}",
     )
-    Path(oos_info_path).write_text(
-        json.dumps(asdict(oos_info), indent=2, sort_keys=True), encoding="utf-8"
-    )
+    Path(oos_info_path).write_text(json.dumps(asdict(oos_info), indent=2, sort_keys=True), encoding="utf-8")
 
     print(f"[train] X: {train_panel_path}")
-    print(
-        f"[oos]   X: {oos_panel_path if (oos_panel_path is not None and not X_oos_std.empty) else '(no OOS rows)'}"
-    )
+    print(f"[oos]   X: {oos_panel_path if (oos_panel_path is not None and not X_oos_std.empty) else '(no OOS rows)'}")
     print(f"[train] y: {y_train_path}")
-    print(
-        f"[oos]   y: {y_oos_path if (y_oos_path is not None and not y_oos_std.empty) else '(no OOS rows)'}"
-    )
+    print(f"[oos]   y: {y_oos_path if (y_oos_path is not None and not y_oos_std.empty) else '(no OOS rows)'}")
     print(f"[info]  X scaler: {train_scaler_path}")
     print(f"[info]  y scaler: {y_scaler_path}")
     print(f"[info]  oos info: {oos_info_path}")

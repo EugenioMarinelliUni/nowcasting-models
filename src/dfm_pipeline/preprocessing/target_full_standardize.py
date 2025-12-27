@@ -64,7 +64,16 @@ def build_full_standardized_target(
     )
 
     # 3) Load X full panel index
-    df_x = pd.read_csv(x_full_panel_csv, parse_dates=["date"])
+    df_x = pd.read_csv(x_full_panel_csv)
+    if "date" in df_x.columns:
+        df_x["date"] = pd.to_datetime(df_x["date"])
+    elif "Date" in df_x.columns:
+        df_x = df_x.rename(columns={"Date": "date"})
+        df_x["date"] = pd.to_datetime(df_x["date"])
+    else:
+        df_x = df_x.rename(columns={df_x.columns[0]: "date"})
+        df_x["date"] = pd.to_datetime(df_x["date"])
+
     df_x = df_x.dropna(subset=["date"]).set_index("date").sort_index()
     idx = df_x.index
 
