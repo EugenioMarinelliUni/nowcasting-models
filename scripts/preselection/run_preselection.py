@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Supports methods: sis, tstat, tstat_lm, lars_tscv, lars_lm
 from __future__ import annotations
 
 import argparse
@@ -12,6 +13,8 @@ import pandas as pd
 from src.dfm_pipeline.preselection.preselect_sis import run_sis_preselection
 from src.dfm_pipeline.preselection.preselect_tstat import run_tstat_preselection
 from src.dfm_pipeline.preselection.preselect_lars import run_lars_tscv_preselection
+from src.dfm_pipeline.preselection.preselect_tstat_lm import run_tstat_lm_preselection
+from src.dfm_pipeline.preselection.preselect_lars_lm import run_lars_lm_preselection
 
 
 # ---------------------------------------------------------------------
@@ -264,11 +267,25 @@ def run_tstat(
     params: Dict[str, Any],
 ) -> Tuple[pd.DataFrame, List[str], Dict[str, Any]]:
     """
-    t-stat preselection wrapper.
+    t-stat preselection wrapper (your original).
 
     Delegates to src.dfm_pipeline.preselection.preselect_tstat.run_tstat_preselection.
     """
     rank_df, selected_vars, meta = run_tstat_preselection(X_rank, y_rank, params)
+    return rank_df, selected_vars, meta
+
+
+def run_tstat_lm(
+    X_rank: pd.DataFrame,
+    y_rank: pd.Series,
+    params: Dict[str, Any],
+) -> Tuple[pd.DataFrame, List[str], Dict[str, Any]]:
+    """
+    t-stat preselection wrapper (Linzenich–Meunier-style).
+
+    Delegates to src.dfm_pipeline.preselection.preselect_tstat_lm.run_tstat_lm_preselection.
+    """
+    rank_df, selected_vars, meta = run_tstat_lm_preselection(X_rank, y_rank, params)
     return rank_df, selected_vars, meta
 
 
@@ -278,11 +295,25 @@ def run_lars_tscv(
     params: Dict[str, Any],
 ) -> Tuple[pd.DataFrame, List[str], Dict[str, Any]]:
     """
-    LARS + time-series CV preselection wrapper.
+    LARS + time-series CV preselection wrapper (your original).
 
     Delegates to src.dfm_pipeline.preselection.preselect_lars.run_lars_tscv_preselection.
     """
     rank_df, selected_vars, meta = run_lars_tscv_preselection(X_rank, y_rank, params)
+    return rank_df, selected_vars, meta
+
+
+def run_lars_lm(
+    X_rank: pd.DataFrame,
+    y_rank: pd.Series,
+    params: Dict[str, Any],
+) -> Tuple[pd.DataFrame, List[str], Dict[str, Any]]:
+    """
+    LARS preselection wrapper (Linzenich–Meunier-style).
+
+    Delegates to src.dfm_pipeline.preselection.preselect_lars_lm.run_lars_lm_preselection.
+    """
+    rank_df, selected_vars, meta = run_lars_lm_preselection(X_rank, y_rank, params)
     return rank_df, selected_vars, meta
 
 
@@ -385,7 +416,7 @@ def main() -> None:
     # Method choice
     ap.add_argument(
         "--method",
-        choices=["sis", "tstat", "lars_tscv"],
+        choices=["sis", "tstat", "tstat_lm", "lars_tscv", "lars_lm"],
         required=True,
         help="Preselection method to run.",
     )
@@ -519,8 +550,12 @@ def main() -> None:
         rank_df, selected_vars, meta = run_sis(X_rank, y_rank, method_params)
     elif args.method == "tstat":
         rank_df, selected_vars, meta = run_tstat(X_rank, y_rank, method_params)
+    elif args.method == "tstat_lm":
+        rank_df, selected_vars, meta = run_tstat_lm(X_rank, y_rank, method_params)
     elif args.method == "lars_tscv":
         rank_df, selected_vars, meta = run_lars_tscv(X_rank, y_rank, method_params)
+    elif args.method == "lars_lm":
+        rank_df, selected_vars, meta = run_lars_lm(X_rank, y_rank, method_params)
     else:
         raise ValueError(f"Unknown method {args.method!r}.")
 
