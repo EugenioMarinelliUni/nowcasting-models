@@ -122,12 +122,13 @@ def _lars_unique_zero_count_order(
             break
 
         # lars_path returns coefs shape (n_features, n_alphas)
-        _, _, coefs = lars_path(
-            Xv,
-            yv_all,
-            method="lar",
-            max_iter=max_iter,
-        )
+        kwargs = {"method": "lar"}
+
+        if max_iter is not None:
+
+            kwargs["max_iter"] = int(max_iter)
+
+        _, _, coefs = lars_path(Xv, yv_all, **kwargs)
 
         coefs = np.asarray(coefs, dtype=float)
         if coefs.ndim != 2 or coefs.shape[0] != len(remaining_cols):
