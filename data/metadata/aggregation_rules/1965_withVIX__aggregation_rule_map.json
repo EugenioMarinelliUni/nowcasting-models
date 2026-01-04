@@ -1,9 +1,9 @@
 {
   "_meta": {
-    "panel": "1960_noVIX",
+    "panel": "1965_withVIX",
     "tag": "train1990_2019",
-    "standardized_x": "dataset\\1960_noVIX\\training_sets\\train1990_2019\\standardized_train__1960_noVIX__train1990_2019.csv",
-    "group_map": "data\\metadata\\variable_group_map_1960_noVIX.json",
+    "standardized_x": "dataset\\1965_withVIX\\training_sets\\train1990_2019\\standardized_train__1965_withVIX__train1990_2019.csv",
+    "group_map": "data\\metadata\\variable_group_map_1965_withVIX.json",
     "tcode_map": "data\\metadata\\tcode_map.json",
     "defaults": {
       "flow": "sum3m",
@@ -616,6 +616,11 @@
       "type": "return",
       "rule": "sum3m",
       "group": "Orders & Inventories"
+    },
+    "VIXCLSx": {
+      "type": "level",
+      "rule": "mean3m",
+      "group": "Stock Market"
     }
   }
 }

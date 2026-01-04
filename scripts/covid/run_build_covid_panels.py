@@ -7,6 +7,12 @@ import sys
 from pathlib import Path
 from typing import Optional, Tuple
 
+# Make dfm_pipeline importable when running from repo root (MUST be before dfm_pipeline imports)
+ROOT = Path(__file__).resolve().parents[2]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
 from dfm_pipeline.covid.io import (  # noqa: E402
     describe_mask,
     load_monthly_panel_csv,
@@ -21,12 +27,6 @@ from dfm_pipeline.covid.methods import (  # noqa: E402
     variant_sparse_dummies,
 )
 from dfm_pipeline.covid.spec import CovidSpec, parse_window  # noqa: E402
-
-# Make dfm_pipeline importable when running from repo root
-ROOT = Path(__file__).resolve().parents[2]
-SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
 
 
 def sanitize_suffix(start: str, end: str) -> str:
@@ -47,7 +47,6 @@ def parse_args() -> argparse.Namespace:
             "  - covid_delete: set Covid window to NaN\n"
             "  - lm_outliers: IQD outliers -> NaN (fit/apply windows)\n"
             "  - lm_dummies: sparse dummy matrix emitted as exogenous regressors (non-block safe)\n"
-            "Legacy variants (dummy residualization / winsor clip) have been removed from this script."
         )
     )
 
@@ -56,11 +55,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--covid-end", required=True, help="Covid window end (YYYY-MM or YYYY-MM-DD).")
     ap.add_argument("--monthly-freq", default="MS", choices=["MS", "ME"], help="Monthly index convention (default MS).")
 
-    ap.add_argument(
-        "--out-dir",
-        default=None,
-        help="Output directory. If omitted, uses the directory of --full-panel.",
-    )
+    ap.add_argument("--out-dir", default=None, help="Output directory. If omitted, uses the directory of --full-panel.")
     ap.add_argument(
         "--suffix",
         default=None,
@@ -89,16 +84,8 @@ def parse_args() -> argparse.Namespace:
         default=5,
         help="Guard: activate dummy only if that date has >= this many non-missing series.",
     )
-    ap.add_argument(
-        "--lm-dummy-standardize",
-        action="store_true",
-        help="Standardize dummy columns over --dummy-std-window.",
-    )
-    ap.add_argument(
-        "--dummy-std-window",
-        default=None,
-        help="Required if --lm-dummy-standardize. Format: 'YYYY-MM-DD,YYYY-MM-DD'.",
-    )
+    ap.add_argument("--lm-dummy-standardize", action="store_true", help="Standardize dummy columns over --dummy-std-window.")
+    ap.add_argument("--dummy-std-window", default=None, help="Required if --lm-dummy-standardize. 'YYYY-MM-DD,YYYY-MM-DD'.")
 
     # -------- LM outliers (IQD -> NaN) --------
     ap.add_argument("--lm-outliers", action="store_true", help="Apply IQD outliers -> NaN variant.")
@@ -107,19 +94,14 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument(
         "--lm-outliers-fit-window",
         default=None,
-        help="Fit window for thresholds (leakage-safe). Format: 'YYYY-MM-DD,YYYY-MM-DD'.",
+        help="Fit window for thresholds (leakage-safe). 'YYYY-MM-DD,YYYY-MM-DD'.",
     )
     ap.add_argument(
         "--lm-outliers-apply-window",
         default=None,
-        help="Apply window for replacement. If omitted, defaults to Covid window. Format: 'YYYY-MM-DD,YYYY-MM-DD'.",
+        help="Apply window for replacement. If omitted, defaults to Covid window. 'YYYY-MM-DD,YYYY-MM-DD'.",
     )
-
-    ap.add_argument(
-        "--allow-leakage",
-        action="store_true",
-        help="Allow fitting outlier thresholds without an explicit fit window.",
-    )
+    ap.add_argument("--allow-leakage", action="store_true", help="Allow fitting outlier thresholds without an explicit fit window.")
 
     return ap.parse_args()
 
@@ -174,7 +156,7 @@ def main() -> None:
         meta = {**base_meta, **res.meta, "masks": {k: describe_mask(v) for k, v in res.masks.items()}}
         _write_meta_and_masks(out_csv.with_suffix("").name, meta, res.masks)
 
-    # ---- lm_exog_dummies (non-block safe) ----
+    # ---- lm_exog_dummies ----
     if args.lm_dummies:
         custom_months = None
         if args.lm_dummy_mode == "custom":
