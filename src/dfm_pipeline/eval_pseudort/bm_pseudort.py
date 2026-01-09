@@ -1,0 +1,360 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Optional, Literal, Tuple, Callable
+
+import numpy as np
+import pandas as pd
+
+from dfm_pipeline.dfm_dyn.state_space import StateSpaceParams, kalman_filter_smoother
+
+
+Horizon = Literal["bac", "now", "for"]
+DelayStyle = Literal["none", "trailing_nan", "json_map"]
+
+
+def month_of_quarter(d: pd.Timestamp) -> int:
+    m = int(d.month)
+    r = m % 3
+    return 3 if r == 0 else r
+
+
+def quarter_end_stamp(d: pd.Timestamp) -> pd.Timestamp:
+    q = (int(d.month) - 1) // 3 + 1
+    end_month = 3 * q
+    return pd.Timestamp(year=int(d.year), month=end_month, day=1)
+
+
+def add_months(d: pd.Timestamp, k: int) -> pd.Timestamp:
+    return (d.to_period("M") + int(k)).to_timestamp(how="start")
+
+
+def months_diff(start: pd.Timestamp, end: pd.Timestamp) -> int:
+    """
+    Integer number of months to move from start -> end.
+    Positive if end is after start, negative otherwise.
+    """
+    return (int(end.year) - int(start.year)) * 12 + (int(end.month) - int(start.month))
+
+
+def trailing_nan_delays(X: pd.DataFrame) -> pd.Series:
+    delays: dict[str, int] = {}
+    arr = X.to_numpy()
+    for j, c in enumerate(X.columns):
+        col = arr[:, j]
+        k = 0
+        for v in col[::-1]:
+            if np.isfinite(v):
+                break
+            k += 1
+        delays[str(c)] = int(k)
+    return pd.Series(delays)
+
+
+def apply_ragged_edge_mask(X: pd.DataFrame, delays: pd.Series, t_end: pd.Timestamp) -> pd.DataFrame:
+    Xrt = X.loc[:t_end].copy()
+    if Xrt.empty:
+        return Xrt
+    for c in Xrt.columns:
+        d = int(delays.get(c, 0))
+        if d > 0 and len(Xrt) >= d:
+            Xrt.iloc[-d:, Xrt.columns.get_loc(c)] = np.nan
+    return Xrt
+
+
+def mask_quarterly_release(y: pd.Series, t_end: pd.Timestamp, gdp_rel: int) -> pd.Series:
+    yrt = y.loc[:t_end].copy()
+    if gdp_rel <= 0 or yrt.empty:
+        return yrt
+    d = int(gdp_rel)
+    if len(yrt) >= d:
+        yrt.iloc[-d:] = np.nan
+    return yrt
+
+
+def _sym(A: np.ndarray) -> np.ndarray:
+    return 0.5 * (A + A.T)
+
+
+def _chol_factor(A: np.ndarray, jitter: float = 1e-10, max_tries: int = 8) -> np.ndarray:
+    A = _sym(A)
+    j = 0.0
+    for _ in range(max_tries):
+        try:
+            return np.linalg.cholesky(A + j * np.eye(A.shape[0]))
+        except np.linalg.LinAlgError:
+            j = jitter if j == 0.0 else (10.0 * j)
+    w, V = np.linalg.eigh(A)
+    w = np.maximum(w, jitter)
+    A_pd = (V * w) @ V.T
+    return np.linalg.cholesky(_sym(A_pd))
+
+
+def _chol_solve(L: np.ndarray, B: np.ndarray) -> np.ndarray:
+    y = np.linalg.solve(L, B)
+    return np.linalg.solve(L.T, y)
+
+
+def _kalman_update_subset(
+    a_pr: np.ndarray,
+    P_pr: np.ndarray,
+    y_obs: np.ndarray,
+    C_sub: np.ndarray,
+    R_sub: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    One Kalman measurement update:
+      prior (a_pr, P_pr) -> posterior (a_upd, P_upd)
+    using only a subset of observation rows.
+    """
+    if y_obs.size == 0:
+        return a_pr, P_pr
+
+    v = y_obs - C_sub @ a_pr
+    S = _sym(C_sub @ P_pr @ C_sub.T + R_sub)
+
+    L = _chol_factor(S, jitter=1e-10)
+    B = C_sub @ P_pr  # (k, m)
+    S_inv_B = _chol_solve(L, B)  # (k, m)
+    K = S_inv_B.T  # (m, k)
+
+    I_m = np.eye(P_pr.shape[0])
+    I_KC = I_m - K @ C_sub
+    P_upd = _sym(I_KC @ P_pr @ I_KC.T + K @ R_sub @ K.T)
+    a_upd = a_pr + K @ v
+    return a_upd, P_upd
+
+
+def forecast_from_last(
+    T: np.ndarray,
+    Q: np.ndarray,
+    a_last: np.ndarray,
+    P_last: np.ndarray,
+    steps: int,
+) -> Tuple[np.ndarray, np.ndarray]:
+    a = a_last.copy()
+    P = P_last.copy()
+    for _ in range(int(steps)):
+        a = T @ a
+        P = T @ P @ T.T + Q
+    return a, P
+
+
+@dataclass(frozen=True)
+class PseudoRTEvalConfig:
+    eval_start: str
+    eval_end: str
+
+    delay_style: DelayStyle = "none"
+    delay_json: Optional[str] = None
+    gdp_rel: int = 0
+
+    horizons: Tuple[Horizon, ...] = ("bac", "now", "for")
+
+    score_by_moq: bool = True
+    score_by_covid: bool = True
+
+
+def compute_scores(pred_df: pd.DataFrame) -> dict:
+    out: dict = {}
+    df = pred_df.copy()
+
+    df["err"] = df["pred"] - df["actual"]
+    df["se"] = df["err"] ** 2
+
+    def rmse_from_se(se: pd.Series) -> float:
+        v = se.to_numpy(dtype=float)
+        v = v[np.isfinite(v)]
+        if v.size == 0:
+            return float("nan")
+        return float(np.sqrt(np.mean(v)))
+
+    def fda(pred: pd.Series, actual: pd.Series) -> float:
+        p = pred.to_numpy(dtype=float)
+        a = actual.to_numpy(dtype=float)
+        ok = np.isfinite(p) & np.isfinite(a) & (p != 0.0) & (a != 0.0)
+        if ok.sum() == 0:
+            return float("nan")
+        return float(np.mean(np.sign(p[ok]) == np.sign(a[ok])))
+
+    out["by_horizon"] = {}
+    for h in sorted(df["horizon"].unique()):
+        sub = df[df["horizon"] == h]
+        out["by_horizon"][h] = {
+            "n": int(sub["se"].notna().sum()),
+            "rmse": rmse_from_se(sub["se"]),
+            "fda": fda(sub["pred"], sub["actual"]),
+        }
+
+    out["by_horizon_moq"] = {}
+    for h in sorted(df["horizon"].unique()):
+        subh = df[df["horizon"] == h]
+        out["by_horizon_moq"][h] = {}
+        for k in (1, 2, 3):
+            sub = subh[subh["moq"] == k]
+            out["by_horizon_moq"][h][str(k)] = {
+                "n": int(sub["se"].notna().sum()),
+                "rmse": rmse_from_se(sub["se"]),
+                "fda": fda(sub["pred"], sub["actual"]),
+            }
+
+    out["by_horizon_covid"] = {}
+    df["target_year"] = pd.to_datetime(df["target_date"]).dt.year
+    for h in sorted(df["horizon"].unique()):
+        subh = df[df["horizon"] == h]
+        out["by_horizon_covid"][h] = {}
+        splits = {
+            "all": subh,
+            "pre_2020": subh[subh["target_year"] < 2020],
+            "covid_2020": subh[subh["target_year"] == 2020],
+            "post_2020": subh[subh["target_year"] > 2020],
+            "no_covid": subh[subh["target_year"] != 2020],
+        }
+        for name, sub in splits.items():
+            out["by_horizon_covid"][h][name] = {
+                "n": int(sub["se"].notna().sum()),
+                "rmse": rmse_from_se(sub["se"]),
+                "fda": fda(sub["pred"], sub["actual"]),
+            }
+
+    return out
+
+
+def run_pseudo_rt_eval(
+    X_full: pd.DataFrame,
+    y_full: pd.Series,
+    fit_fn: Callable,
+    model_config,
+    eval_cfg: PseudoRTEvalConfig,
+) -> Tuple[pd.DataFrame, dict]:
+    """
+    Expanding-window recursive pseudo-OOS evaluation.
+
+    Quarter-end leakage fix:
+      If horizon="now" and eval_date==target_date (quarter-end month),
+      compute prediction using a_pred[t] updated only with monthly indicators at t,
+      excluding quarterly observation.
+    """
+    if not isinstance(X_full.index, pd.DatetimeIndex):
+        raise TypeError("X_full must be indexed by DatetimeIndex.")
+    if not isinstance(y_full.index, pd.DatetimeIndex):
+        raise TypeError("y_full must be indexed by DatetimeIndex.")
+
+    X_full = X_full.sort_index()
+    y_full = y_full.sort_index()
+
+    eval_start = pd.to_datetime(eval_cfg.eval_start)
+    eval_end = pd.to_datetime(eval_cfg.eval_end)
+
+    eval_dates = X_full.loc[(X_full.index >= eval_start) & (X_full.index <= eval_end)].index
+    if eval_dates.empty:
+        raise ValueError("Evaluation window produced no dates on the panel monthly grid.")
+
+    delays: Optional[pd.Series]
+    if eval_cfg.delay_style == "trailing_nan":
+        delays = trailing_nan_delays(X_full)
+    elif eval_cfg.delay_style == "json_map":
+        if eval_cfg.delay_json is None:
+            raise ValueError("delay_style='json_map' requires delay_json path.")
+        delays = pd.Series(pd.read_json(eval_cfg.delay_json, typ="series"))
+        delays = delays.reindex(X_full.columns).fillna(0).astype(int)
+    elif eval_cfg.delay_style == "none":
+        delays = None
+    else:
+        raise ValueError(f"Unknown delay_style: {eval_cfg.delay_style!r}")
+
+    nM = int(X_full.shape[1])
+    rows: list[dict] = []
+
+    for t in eval_dates:
+        if delays is None:
+            Xrt = X_full.loc[:t].copy()
+        else:
+            Xrt = apply_ragged_edge_mask(X_full, delays, t_end=t)
+
+        yrt = mask_quarterly_release(y_full, t_end=t, gdp_rel=int(eval_cfg.gdp_rel))
+        yrt = yrt.reindex(Xrt.index)
+
+        Y_monthly = Xrt.to_numpy(dtype=float)
+        y_quarterly = yrt.to_numpy(dtype=float)
+
+        res = fit_fn(Y_monthly=Y_monthly, y_quarterly=y_quarterly, config=model_config)
+
+        Y_stack = np.column_stack([Y_monthly, y_quarterly.reshape(-1, 1)]).astype(float)
+        ss = StateSpaceParams(T=res.T, Q=res.Q, C=res.C, R=res.R, a0=res.a0, P0=res.P0)
+        ks = kalman_filter_smoother(Y_stack, ss)
+
+        Cq = res.C[nM, :].astype(float)
+
+        a_t_filt = ks.a_filt[-1, :].astype(float)
+        P_t_filt = ks.P_filt[-1, :, :].astype(float)
+
+        t_moq = month_of_quarter(t)
+        iQ = quarter_end_stamp(t)
+
+        targets: dict[Horizon, pd.Timestamp] = {
+            "bac": add_months(iQ, -3),
+            "now": iQ,
+            "for": add_months(iQ, 3),
+        }
+
+        for h in eval_cfg.horizons:
+            target_date = targets[h]
+
+            if target_date not in y_full.index:
+                pred = np.nan
+                actual = np.nan
+            else:
+                actual = float(y_full.loc[target_date])
+
+                if target_date in Xrt.index:
+                    idx_td = int(Xrt.index.get_loc(target_date))
+
+                    if h == "now" and target_date == t:
+                        a_pr = ks.a_pred[idx_td, :].astype(float)
+                        P_pr = ks.P_pred[idx_td, :, :].astype(float)
+
+                        x_row = Xrt.iloc[idx_td, :].to_numpy(dtype=float)
+                        obs_idx = np.where(np.isfinite(x_row))[0]
+
+                        if obs_idx.size == 0:
+                            a_upd = a_pr
+                        else:
+                            C_m = res.C[:nM, :]
+                            R_m = res.R[:nM, :nM]
+                            C_sub = C_m[obs_idx, :]
+                            R_sub = R_m[np.ix_(obs_idx, obs_idx)]
+                            y_obs = x_row[obs_idx]
+                            a_upd, _P_upd = _kalman_update_subset(a_pr, P_pr, y_obs, C_sub, R_sub)
+
+                        pred = float(Cq @ a_upd)
+
+                    else:
+                        a_td = ks.a_smooth[idx_td, :].astype(float)
+                        pred = float(Cq @ a_td)
+
+                else:
+                    steps = months_diff(t, target_date)
+                    if steps < 0:
+                        pred = np.nan
+                    else:
+                        a_f, _P_f = forecast_from_last(res.T, res.Q, a_t_filt, P_t_filt, steps=steps)
+                        pred = float(Cq @ a_f)
+
+            rows.append(
+                {
+                    "eval_date": t,
+                    "moq": int(t_moq),
+                    "horizon": h,
+                    "target_date": target_date,
+                    "pred": pred,
+                    "actual": actual,
+                }
+            )
+
+    pred_df = pd.DataFrame(rows)
+    pred_df["eval_date"] = pd.to_datetime(pred_df["eval_date"])
+    pred_df["target_date"] = pd.to_datetime(pred_df["target_date"])
+
+    scores = compute_scores(pred_df)
+    return pred_df, scores
