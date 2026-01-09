@@ -1,61 +1,14 @@
-import numpy as np
-import pandas as pd
+"""
+Time-series transformation utilities.
 
+Contains:
+1) apply_tcode_transformations / standardize:
+   Stock–Watson / FRED-MD style per-series transformations and standardization.
 
-def apply_tcode_transformations(df: pd.DataFrame, tcode_map: dict) -> pd.DataFrame:
-    """
-    Apply Stock-Watson-style transformations to each series in a DataFrame
-    according to a tcode mapping.
-
-    Parameters:
-    - df: DataFrame with raw data (rows = time, columns = series)
-    - tcode_map: dict mapping each series name to a transformation code (1 to 7)
-
-    Returns:
-    - transformed_df: DataFrame with transformed series
-    """
-    def transform_series(x: pd.Series, code: int) -> pd.Series:
-        x = x.copy()
-        if code == 1:
-            return x
-        elif code == 2:
-            return x.diff()
-        elif code == 3:
-            return x.diff().diff()
-        elif code == 4:
-            return np.log(x.replace(0, np.nan))
-        elif code == 5:
-            return np.log(x.replace(0, np.nan)).diff()
-        elif code == 6:
-            return np.log(x.replace(0, np.nan)).diff().diff()
-        elif code == 7:
-            return (x / x.shift(1) - 1).diff()
-        else:
-            raise ValueError(f"Unknown tcode: {code}")
-
-    transformed = {}
-    for col in df.columns:
-        tcode = tcode_map.get(col)
-        if tcode is None:
-            raise KeyError(f"No transformation code found for series: {col}")
-        transformed[col] = transform_series(df[col], tcode)
-
-    return pd.DataFrame(transformed, index=df.index)
-
-
-def standardize(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Demean and standardize each column to have zero mean and unit variance.
-
-    Parameters:
-    - df: DataFrame with time series data
-
-    Returns:
-    - standardized_df: DataFrame with standardized values
-    """
-    return (df - df.mean()) / df.std()
-
-###############################################################################
+2) extract_tcodes_to_json (+ helpers):
+   Extract embedded FRED-MD t-codes row from a CSV (header + tcode row + data)
+   and write a clean JSON mapping {series: tcode}.
+"""
 
 from __future__ import annotations
 
@@ -68,7 +21,7 @@ import numpy as np
 import pandas as pd
 
 
-# Allowed Stock–Watson/FRED-MD transformation codes
+# Allowed Stock–Watson / FRED-MD transformation codes
 _ALLOWED_TCODES = {1, 2, 3, 4, 5, 6, 7}
 
 
@@ -176,21 +129,10 @@ def extract_tcodes_to_json(
     ------------
     1) Reads the CSV header to get the true series names (including `date_col`).
     2) Finds the embedded t-code row (either provided or auto-detected).
-    3) Reads *only that row* as data and builds {series -> tcode} (dropping `date_col`).
+    3) Reads only that row as data and builds {series -> tcode} (dropping `date_col`).
     4) Optionally checks that every series has a valid code (1..7).
-    5) Writes a *pure* JSON mapping to `out_json_path`.
+    5) Writes a pure JSON mapping to `out_json_path`.
     6) Optionally writes a sidecar metadata JSON with provenance info.
-
-    Inputs
-    ------
-    csv_path : path to the original CSV (header row + a row of t-codes + data rows)
-    out_json_path : destination for the mapping JSON (keys=series names, values in {1..7})
-    date_col : name of the date column (default "sasdate")
-    tcode_row : 0-based row index (incl. header) of the t-code row; if None, detect or default to 1
-    autodetect_tcode_row : try to detect the t-code row when not provided
-    require_all_tcodes : raise if any series column lacks a valid code
-    overwrite : allow overwriting an existing JSON
-    write_sidecar_metadata : also write `<out_json_path>.meta.json` with provenance info
 
     Returns
     -------
@@ -203,7 +145,9 @@ def extract_tcodes_to_json(
     # Read header to obtain the definitive list of columns
     header_cols = pd.read_csv(csv_path, nrows=0).columns.tolist()
     if date_col not in header_cols:
-        raise ValueError(f"Expected date column '{date_col}' in CSV header; found {header_cols[:6]}...")
+        raise ValueError(
+            f"Expected date column '{date_col}' in CSV header; found {header_cols[:6]}..."
+        )
 
     # Determine which row contains t-codes
     if tcode_row is None:
@@ -217,7 +161,10 @@ def extract_tcodes_to_json(
 
     # Validate map against header columns (no need to read the data block)
     tcode_map, check = _validate_tcode_map_against_columns(
-        df_columns=header_cols, tcode_map=raw_map, date_col=date_col, require_all=require_all_tcodes
+        df_columns=header_cols,
+        tcode_map=raw_map,
+        date_col=date_col,
+        require_all=require_all_tcodes,
     )
 
     # Handle file overwrite policy
@@ -247,3 +194,57 @@ def extract_tcodes_to_json(
         info["metadata_json_path"] = str(meta_path)
 
     return tcode_map, info
+
+
+# ---------- Stock–Watson/FRED-MD transformations ----------
+
+def apply_tcode_transformations(df: pd.DataFrame, tcode_map: dict) -> pd.DataFrame:
+    """
+    Apply Stock–Watson-style transformations to each series in a DataFrame
+    according to a tcode mapping.
+
+    Parameters
+    ----------
+    df : DataFrame
+        Raw data (rows=time, columns=series).
+    tcode_map : dict
+        Mapping series name -> transformation code in {1..7}.
+
+    Returns
+    -------
+    DataFrame
+        Transformed series aligned to df.index.
+    """
+    def transform_series(x: pd.Series, code: int) -> pd.Series:
+        x = x.copy()
+        if code == 1:
+            return x
+        if code == 2:
+            return x.diff()
+        if code == 3:
+            return x.diff().diff()
+        if code == 4:
+            return np.log(x.replace(0, np.nan))
+        if code == 5:
+            return np.log(x.replace(0, np.nan)).diff()
+        if code == 6:
+            return np.log(x.replace(0, np.nan)).diff().diff()
+        if code == 7:
+            return (x / x.shift(1) - 1).diff()
+        raise ValueError(f"Unknown tcode: {code}")
+
+    transformed = {}
+    for col in df.columns:
+        tcode = tcode_map.get(col)
+        if tcode is None:
+            raise KeyError(f"No transformation code found for series: {col}")
+        transformed[col] = transform_series(df[col], int(tcode))
+
+    return pd.DataFrame(transformed, index=df.index)
+
+
+def standardize(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Demean and standardize each column to have zero mean and unit variance.
+    """
+    return (df - df.mean()) / df.std()
