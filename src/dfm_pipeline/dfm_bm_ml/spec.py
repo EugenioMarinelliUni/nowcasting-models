@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Sequence, Literal
+from typing import Optional, Sequence, Literal, TYPE_CHECKING
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from .state_builder import BMParams
 
 
 @dataclass(frozen=True)
@@ -63,3 +66,6 @@ class BMDfmResult:
     idx_idio_quarterly: slice
     f_t_idx: np.ndarray           # (r_total,) state indices for contemporaneous factors (concatenated by blocks)
     f_stack_idx: np.ndarray       # (5*r_total,) state indices for [t,t-1,t-2,t-3,t-4] factor stack
+
+    # NEW: store final BMParams to enable warm-start in pseudo-RT evaluation
+    params_final: Optional["BMParams"] = None
