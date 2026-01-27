@@ -18,9 +18,9 @@ import os
 impl = os.getenv("DFM_STATE_SPACE_IMPL", "").strip().lower()
 
 if impl == "old":
-    from dfm_pipeline.dfm_dyn import state_space_old as ss
+    from dfm_pipeline.dfm_dyn import state_space_old as ss, state_space_new_cached as ss
 elif impl == "new_cached":
-    from dfm_pipeline.dfm_bm_ml import state_space_new_cached as ss
+    pass
 else:
     from dfm_pipeline.dfm_dyn import state_space_new as ss
 

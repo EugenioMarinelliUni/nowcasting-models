@@ -1,222 +1,261 @@
 """
-Equivalence check: NEW vs NEW_CACHED state-space backends.
+End-to-end equivalence check: NEW vs NEW_CACHED using the FAST evaluator.
 
-This script is intended to catch any numerical differences introduced by caching,
-while leaving the underlying math/logic unchanged.
+This avoids guessing internal function signatures and directly tests the
+actual pipeline you run in practice.
 
-Assumptions:
-- Both implementations expose the same public API symbols used below.
-- You have dfm_pipeline.dfm_dyn.state_space_new
-- You have dfm_pipeline.dfm_bm_ml.state_space_new_cached
+It:
+  1) runs scripts/dfm_bm_ml/run_eval_pseudort_bm_dfm_fast.py twice
+     - once with DFM_STATE_SPACE_IMPL unset (NEW)
+     - once with DFM_STATE_SPACE_IMPL=new_cached
+  2) compares predictions.csv and scores.json
+  3) prints first mismatching rows + abs diff summary
+  4) exits non-zero if differences exceed tolerance
 """
 
 from __future__ import annotations
 
 import argparse
-import importlib
 import json
-import math
 import os
-from dataclasses import dataclass
-from typing import Any, Dict, Iterable, Tuple
+import shutil
+import subprocess
+import sys
+from pathlib import Path
 
-import numpy as np
-
-
-@dataclass
-class DiffReport:
-    ok: bool
-    max_abs: float
-    mean_abs: float
-    n_diff: int
-    n_total: int
+import pandas as pd
 
 
-def _as_numpy(x: Any) -> np.ndarray:
-    if isinstance(x, np.ndarray):
-        return x
-    return np.asarray(x)
+def _run_fast_eval(
+    *,
+    panel_csv: str,
+    target_csv: str,
+    outdir: Path,
+    eval_start: str,
+    eval_end: str,
+    r: int,
+    p: int,
+    max_iter: int,
+    tol: str,
+    impl: str | None,
+) -> None:
+    if outdir.exists():
+        shutil.rmtree(outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    env = os.environ.copy()
+
+    # Reduce timing noise / avoid thread oversubscription.
+    env["OMP_NUM_THREADS"] = "1"
+    env["OPENBLAS_NUM_THREADS"] = "1"
+    env["MKL_NUM_THREADS"] = "1"
+    env["NUMEXPR_NUM_THREADS"] = "1"
+
+    # Select impl.
+    if impl is None:
+        env.pop("DFM_STATE_SPACE_IMPL", None)
+    else:
+        env["DFM_STATE_SPACE_IMPL"] = impl
+
+    cmd = [
+        sys.executable,
+        "scripts/dfm_bm_ml/run_eval_pseudort_bm_dfm_fast.py",
+        "--panel-csv",
+        panel_csv,
+        "--target-csv",
+        target_csv,
+        "--date-col",
+        "sasdate",
+        "--target-col",
+        "y",
+        "--outdir",
+        str(outdir),
+        "--r",
+        str(r),
+        "--p",
+        str(p),
+        "--max-iter",
+        str(max_iter),
+        "--tol",
+        str(tol),
+        "--eval-start",
+        eval_start,
+        "--eval-end",
+        eval_end,
+        "--delay-style",
+        "none",
+        "--gdp-rel",
+        "0",
+    ]
+
+    print("============================================================")
+    print(f"RUN: FAST eval | impl={'NEW' if impl is None else impl} | outdir={outdir}")
+    print("============================================================")
+    subprocess.run(cmd, env=env, check=True)
 
 
-def _finite_mask(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    return np.isfinite(a) & np.isfinite(b)
+def _compare_predictions(a_path: Path, b_path: Path, float_tol: float) -> tuple[pd.DataFrame, pd.Series]:
+    A = pd.read_csv(a_path)
+    B = pd.read_csv(b_path)
+
+    key_cols = ["eval_date", "moq", "horizon", "target_date", "actual"]
+    A_cols = set(A.columns)
+    B_cols = set(B.columns)
+    if A_cols != B_cols:
+        raise RuntimeError(f"Column mismatch:\nA={sorted(A_cols)}\nB={sorted(B_cols)}")
+
+    merged = A.merge(B, on=key_cols, suffixes=("_new", "_cached"), how="inner")
+    if len(merged) != len(A) or len(merged) != len(B):
+        raise RuntimeError(
+            f"Row alignment mismatch after merge: len(A)={len(A)}, len(B)={len(B)}, len(merged)={len(merged)}. "
+            "Check keys and ordering."
+        )
+
+    merged["abs_diff"] = (merged["pred_new"] - merged["pred_cached"]).abs()
+    mism = merged.loc[merged["abs_diff"] > float_tol].copy()
+    return mism, merged["abs_diff"]
 
 
-def compare_arrays(a: Any, b: Any, *, atol: float, rtol: float) -> DiffReport:
-    A = _as_numpy(a).astype(float, copy=False)
-    B = _as_numpy(b).astype(float, copy=False)
+def _compare_scores(a_path: Path, b_path: Path) -> dict:
+    with a_path.open("r", encoding="utf-8") as f:
+        A = json.load(f)
+    with b_path.open("r", encoding="utf-8") as f:
+        B = json.load(f)
 
-    if A.shape != B.shape:
-        raise ValueError(f"Shape mismatch: {A.shape} vs {B.shape}")
+    # Simple structural comparison + numeric deltas where possible.
+    # If keys differ, report that immediately.
+    if A.keys() != B.keys():
+        return {"ok": False, "reason": "Top-level keys differ", "A_keys": sorted(A.keys()), "B_keys": sorted(B.keys())}
 
-    m = _finite_mask(A, B)
-    if m.size == 0:
-        return DiffReport(ok=True, max_abs=0.0, mean_abs=0.0, n_diff=0, n_total=0)
+    # Focus on the most important parts.
+    out = {"ok": True, "deltas": {}}
 
-    diff = np.zeros_like(A, dtype=float)
-    diff[m] = np.abs(A[m] - B[m])
+    def _num(x):
+        return isinstance(x, (int, float)) and not isinstance(x, bool)
 
-    max_abs = float(np.max(diff[m])) if np.any(m) else 0.0
-    mean_abs = float(np.mean(diff[m])) if np.any(m) else 0.0
+    def _walk(prefix, a, b):
+        if type(a) != type(b):
+            out["ok"] = False
+            out["deltas"][prefix] = {"type_mismatch": (str(type(a)), str(type(b)))}
+            return
+        if isinstance(a, dict):
+            if a.keys() != b.keys():
+                out["ok"] = False
+                out["deltas"][prefix] = {"keys_mismatch": (sorted(a.keys()), sorted(b.keys()))}
+                return
+            for k in a.keys():
+                _walk(f"{prefix}.{k}" if prefix else k, a[k], b[k])
+        elif isinstance(a, list):
+            if len(a) != len(b):
+                out["ok"] = False
+                out["deltas"][prefix] = {"len_mismatch": (len(a), len(b))}
+                return
+            for i, (ai, bi) in enumerate(zip(a, b)):
+                _walk(f"{prefix}[{i}]", ai, bi)
+        else:
+            if _num(a) and _num(b):
+                delta = float(a) - float(b)
+                if delta != 0.0:
+                    out["deltas"][prefix] = {"A": float(a), "B": float(b), "delta": delta}
+            else:
+                if a != b:
+                    out["deltas"][prefix] = {"A": a, "B": b}
 
-    tol = atol + rtol * np.abs(A)
-    n_diff = int(np.sum((diff > tol) & m))
-    n_total = int(np.sum(m))
+    _walk("", A, B)
 
-    ok = (n_diff == 0)
-    return DiffReport(ok=ok, max_abs=max_abs, mean_abs=mean_abs, n_diff=n_diff, n_total=n_total)
-
-
-def _get_public_callables(mod) -> Dict[str, Any]:
-    """
-    Return a dict of public callables (functions) in the module.
-    Filters out private names and non-callables.
-    """
-    out: Dict[str, Any] = {}
-    for name in dir(mod):
-        if name.startswith("_"):
-            continue
-        obj = getattr(mod, name)
-        if callable(obj):
-            out[name] = obj
+    # If only tiny floating-point differences exist, keep ok=True.
     return out
 
 
-def _pick_entrypoints(mod) -> Tuple[str, ...]:
-    """
-    Prefer comparing the key routines used by BM-DFM.
-    Fall back to comparing all public callables if we can't identify them.
-    """
-    preferred = (
-        "kalman_filter_only",
-        "kalman_filter_smoother",
-    )
-    pub = _get_public_callables(mod)
-    chosen = [n for n in preferred if n in pub]
-    if chosen:
-        return tuple(chosen)
-    return tuple(sorted(pub.keys()))
-
-
-def _call(fn, args: Dict[str, Any]):
-    """
-    Call function with kwargs; allows missing kwargs by filtering to signature.
-    """
-    import inspect
-
-    sig = inspect.signature(fn)
-    kw = {k: v for k, v in args.items() if k in sig.parameters}
-    return fn(**kw)
-
-
 def main() -> int:
-    p = argparse.ArgumentParser()
-    p.add_argument("--inputs-npz", required=True, help="Path to NPZ with inputs for state-space calls.")
-    p.add_argument("--atol", type=float, default=1e-12)
-    p.add_argument("--rtol", type=float, default=1e-10)
-    p.add_argument("--json-out", default="", help="Optional path to write a JSON report.")
-    p.add_argument("--verbose", action="store_true")
-    args = p.parse_args()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--panel-csv", required=True)
+    ap.add_argument("--target-csv", required=True)
+    ap.add_argument("--eval-start", default="2010-01-01")
+    ap.add_argument("--eval-end", default="2010-01-01")
+    ap.add_argument("--r", type=int, default=1)
+    ap.add_argument("--p", type=int, default=1)
+    ap.add_argument("--max-iter", type=int, default=15)
+    ap.add_argument("--tol", default="1e-4")
+    ap.add_argument("--float-tol", type=float, default=1e-12, help="Tolerance for prediction equality checks.")
+    ap.add_argument("--outroot", default="runs/check_cached_equivalence")
+    args = ap.parse_args()
 
-    # Load input bundle
-    # Expected: a dict-like of arrays/scalars needed to call the entrypoints.
-    # You create this NPZ once from your pipeline at a known iteration.
-    bundle = np.load(args.inputs_npz, allow_pickle=True)
-    call_kwargs: Dict[str, Any] = {}
-    for k in bundle.files:
-        call_kwargs[k] = bundle[k].item() if bundle[k].dtype == object else bundle[k]
+    outroot = Path(args.outroot)
+    out_new = outroot / "new"
+    out_cached = outroot / "new_cached"
 
-    ss_new = importlib.import_module("dfm_pipeline.dfm_dyn.state_space_new")
-    ss_cached = importlib.import_module("dfm_pipeline.dfm_bm_ml.state_space_new_cached")
+    _run_fast_eval(
+        panel_csv=args.panel_csv,
+        target_csv=args.target_csv,
+        outdir=out_new,
+        eval_start=args.eval_start,
+        eval_end=args.eval_end,
+        r=args.r,
+        p=args.p,
+        max_iter=args.max_iter,
+        tol=args.tol,
+        impl=None,
+    )
+    _run_fast_eval(
+        panel_csv=args.panel_csv,
+        target_csv=args.target_csv,
+        outdir=out_cached,
+        eval_start=args.eval_start,
+        eval_end=args.eval_end,
+        r=args.r,
+        p=args.p,
+        max_iter=args.max_iter,
+        tol=args.tol,
+        impl="new_cached",
+    )
 
-    ep = _pick_entrypoints(ss_new)
+    pred_new = out_new / "predictions.csv"
+    pred_cached = out_cached / "predictions.csv"
+    scores_new = out_new / "scores.json"
+    scores_cached = out_cached / "scores.json"
 
-    results: Dict[str, Any] = {"ok": True, "functions": {}}
+    print("============================================================")
+    print("COMPARE: predictions.csv (NEW vs NEW_CACHED)")
+    print("============================================================")
+    mism, abs_diff = _compare_predictions(pred_new, pred_cached, args.float_tol)
 
-    for name in ep:
-        if not hasattr(ss_cached, name):
-            results["ok"] = False
-            results["functions"][name] = {"ok": False, "error": "missing_in_cached"}
-            continue
+    if len(mism) == 0:
+        print("[OK] No mismatches above tolerance.")
+    else:
+        print(f"[FAIL] Found {len(mism)} mismatching rows out of {len(abs_diff)} (tol={args.float_tol:g})")
+        cols = ["eval_date", "moq", "horizon", "target_date", "pred_new", "pred_cached", "actual", "abs_diff"]
+        print(mism.sort_values("abs_diff", ascending=False).head(25)[cols].to_string(index=False))
 
-        fn_a = getattr(ss_new, name)
-        fn_b = getattr(ss_cached, name)
+    print("============================================================")
+    print("ABS DIFF SUMMARY")
+    print("============================================================")
+    print(abs_diff.describe())
+    print(f"max_abs_diff = {abs_diff.max()}")
 
-        try:
-            out_a = _call(fn_a, call_kwargs)
-            out_b = _call(fn_b, call_kwargs)
-        except Exception as e:
-            results["ok"] = False
-            results["functions"][name] = {"ok": False, "error": f"call_failed: {type(e).__name__}: {e}"}
-            continue
-
-        # Outputs might be a tuple; compare elementwise
-        if isinstance(out_a, tuple) and isinstance(out_b, tuple):
-            if len(out_a) != len(out_b):
-                results["ok"] = False
-                results["functions"][name] = {"ok": False, "error": "tuple_len_mismatch"}
-                continue
-
-            per = []
-            ok_all = True
-            max_abs = 0.0
-            mean_abs_acc = 0.0
-            n_total_acc = 0
-            n_diff_acc = 0
-
-            for i, (xa, xb) in enumerate(zip(out_a, out_b)):
-                rep = compare_arrays(xa, xb, atol=args.atol, rtol=args.rtol)
-                per.append(
-                    {
-                        "idx": i,
-                        "ok": rep.ok,
-                        "max_abs": rep.max_abs,
-                        "mean_abs": rep.mean_abs,
-                        "n_diff": rep.n_diff,
-                        "n_total": rep.n_total,
-                    }
-                )
-                ok_all = ok_all and rep.ok
-                max_abs = max(max_abs, rep.max_abs)
-                mean_abs_acc += rep.mean_abs * rep.n_total
-                n_total_acc += rep.n_total
-                n_diff_acc += rep.n_diff
-
-            mean_abs = (mean_abs_acc / n_total_acc) if n_total_acc else 0.0
-
-            results["functions"][name] = {
-                "ok": ok_all,
-                "max_abs": max_abs,
-                "mean_abs": mean_abs,
-                "n_diff": n_diff_acc,
-                "n_total": n_total_acc,
-                "per_output": per,
-            }
-            results["ok"] = results["ok"] and ok_all
-
+    print("============================================================")
+    print("COMPARE: scores.json (NEW vs NEW_CACHED)")
+    print("============================================================")
+    score_cmp = _compare_scores(scores_new, scores_cached)
+    if score_cmp.get("ok", False):
+        if len(score_cmp.get("deltas", {})) == 0:
+            print("[OK] scores.json identical.")
         else:
-            rep = compare_arrays(out_a, out_b, atol=args.atol, rtol=args.rtol)
-            results["functions"][name] = {
-                "ok": rep.ok,
-                "max_abs": rep.max_abs,
-                "mean_abs": rep.mean_abs,
-                "n_diff": rep.n_diff,
-                "n_total": rep.n_total,
-            }
-            results["ok"] = results["ok"] and rep.ok
+            # Likely tiny float differences; print a limited view.
+            deltas = score_cmp["deltas"]
+            print(f"[WARN] scores.json has {len(deltas)} differing leaves (often float roundoff). Showing first 40:")
+            for i, (k, v) in enumerate(deltas.items()):
+                if i >= 40:
+                    break
+                print(f"- {k}: {v}")
+    else:
+        print("[FAIL] scores.json structural mismatch:")
+        print(score_cmp)
 
-        if args.verbose:
-            r = results["functions"][name]
-            print(
-                f"{name}: ok={r['ok']} max_abs={r.get('max_abs', None)} "
-                f"mean_abs={r.get('mean_abs', None)} n_diff={r.get('n_diff', None)}/{r.get('n_total', None)}"
-            )
-
-    if args.json_out:
-        with open(args.json_out, "w", encoding="utf-8") as f:
-            json.dump(results, f, indent=2, sort_keys=True)
-
-    return 0 if results["ok"] else 2
+    # Exit policy: fail only if prediction diffs exceed tolerance or score structure differs.
+    if len(mism) > 0 or not score_cmp.get("ok", False):
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
