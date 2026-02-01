@@ -1,80 +1,63 @@
 """
-State-space implementation selector for dfm_dyn.
+Implementation selector for the state-space / Kalman routines used by dfm_dyn.
 
-Controls which implementation is used at runtime via env var:
+Selection is controlled by env var DFM_STATE_SPACE_IMPL:
 
-- DFM_STATE_SPACE_IMPL=old        -> state_space_old
-- DFM_STATE_SPACE_IMPL=new_cached -> state_space_new_cached
-- (default / anything else)       -> state_space_new
+  - "old"           -> state_space_old
+  - "new"           -> state_space_new
+  - "new_cached"    -> state_space_new_cached
+  - "new_uni"       -> state_space_new_uni
+  - "new_uni_numba" -> state_space_new_uni_numba
 
-This module intentionally re-exports the public API used by callers
-(e.g., dfm_bm_ml/fast/em_fast.py) so import sites remain stable.
+Default: "new".
+
+Important:
+- We always source the *type definitions* (StateSpaceParams, KalmanSmootherResult)
+  from state_space_new to keep a stable public API, even if an alternative
+  implementation module does not define them.
+- Functions are taken from the selected implementation module when available,
+  otherwise they fall back to state_space_new.
 """
 
 from __future__ import annotations
 
 import os
-from typing import Any
 
+from . import state_space_new as _base
 
-def _select_impl():
-    impl = os.getenv("DFM_STATE_SPACE_IMPL", "").strip().lower()
-    if impl == "old":
-        from . import state_space_old as ss  # type: ignore
-    elif impl == "new_cached":
-        from . import state_space_new_cached as ss  # type: ignore
-    else:
-        from . import state_space_new as ss  # type: ignore
-    return ss
+_impl = os.getenv("DFM_STATE_SPACE_IMPL", "").strip().lower()
 
+if _impl == "old":
+    from . import state_space_old as _ss
+elif _impl == "new_cached":
+    from . import state_space_new_cached as _ss
+elif _impl == "new_uni":
+    from . import state_space_new_uni as _ss
+elif _impl in ("new_uni_numba", "new_numba_uni", "uni_numba"):
+    from . import state_space_new_uni_numba as _ss
+else:
+    from . import state_space_new as _ss
 
-_ss = _select_impl()
+# --------
+# Types
+# --------
+StateSpaceParams = _base.StateSpaceParams
+KalmanSmootherResult = getattr(_ss, "KalmanSmootherResult", _base.KalmanSmootherResult)
 
-# ---- Public API wrappers (stable names for callers) ----
+# ------------
+# Public API
+# ------------
+build_companion_transition = getattr(_ss, "build_companion_transition", _base.build_companion_transition)
+build_dfm_state_space = getattr(_ss, "build_dfm_state_space", _base.build_dfm_state_space)
 
-def kalman_filter_only(*args: Any, **kwargs: Any):
-    return _ss.kalman_filter_only(*args, **kwargs)
-
-
-def kalman_filter_smoother(*args: Any, **kwargs: Any):
-    return _ss.kalman_filter_smoother(*args, **kwargs)
-
-
-# ---- Optional helpers frequently referenced in profiling / internal code ----
-# If the selected impl has these, expose them under the same names.
-
-def _cho_factor_pd(*args: Any, **kwargs: Any):
-    fn = getattr(_ss, "_cho_factor_pd", None)
-    if fn is None:
-        raise AttributeError(f"{_ss.__name__} has no attribute _cho_factor_pd")
-    return fn(*args, **kwargs)
-
-
-def _cho_solve(*args: Any, **kwargs: Any):
-    fn = getattr(_ss, "_cho_solve", None)
-    if fn is None:
-        raise AttributeError(f"{_ss.__name__} has no attribute _cho_solve")
-    return fn(*args, **kwargs)
-
-
-def __getattr__(name: str):
-    # Forward any other attribute lookups to the selected implementation.
-    try:
-        return getattr(_ss, name)
-    except AttributeError as e:
-        raise AttributeError(f"state_space dispatcher has no attribute {name}") from e
-
-
-def __dir__():
-    # Help IDEs / completion.
-    base = set(globals().keys())
-    impl = set(dir(_ss))
-    return sorted(base | impl)
-
+kalman_filter_only = getattr(_ss, "kalman_filter_only", _base.kalman_filter_only)
+kalman_filter_smoother = getattr(_ss, "kalman_filter_smoother", _base.kalman_filter_smoother)
 
 __all__ = [
+    "StateSpaceParams",
+    "KalmanSmootherResult",
+    "build_companion_transition",
+    "build_dfm_state_space",
     "kalman_filter_only",
     "kalman_filter_smoother",
-    "_cho_factor_pd",
-    "_cho_solve",
 ]
