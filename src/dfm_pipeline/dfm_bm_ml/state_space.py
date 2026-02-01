@@ -1,27 +1,19 @@
 """
-Selector module for BM-ML state-space backend.
+Thin shim for backward-compatibility.
 
-Resolution order (via env var DFM_STATE_SPACE_IMPL):
-- "old"        -> dfm_pipeline.dfm_dyn.state_space_old
-- "new_cached" -> dfm_pipeline.dfm_bm_ml.state_space_new_cached
-- default      -> dfm_pipeline.dfm_dyn.state_space_new
+The BM-DFM code historically imported Kalman routines from:
+  dfm_pipeline.dfm_bm_ml.state_space
 
-Consumers should do:
-    from dfm_pipeline.dfm_bm_ml.state_space import ss
-and then call ss.<function>(...)
+We now route everything through dfm_pipeline.dfm_dyn.state_space, which
+supports multiple implementations via DFM_STATE_SPACE_IMPL.
 """
 
 from __future__ import annotations
 
-import os
+from dfm_pipeline.dfm_dyn import state_space as ss  # respects DFM_STATE_SPACE_IMPL
 
-impl = os.getenv("DFM_STATE_SPACE_IMPL", "").strip().lower()
+KalmanFilterResult = ss.KalmanFilterResult
+KalmanSmootherResult = ss.KalmanSmootherResult
 
-if impl == "old":
-    from dfm_pipeline.dfm_dyn import state_space_old as ss, state_space_new_cached as ss
-elif impl == "new_cached":
-    pass
-else:
-    from dfm_pipeline.dfm_dyn import state_space_new as ss
-
-__all__ = ["ss", "impl"]
+kalman_filter_only = ss.kalman_filter_only
+kalman_filter_smoother = ss.kalman_filter_smoother
