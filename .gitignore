@@ -70,3 +70,19 @@ data/factors/
 data/metadata/variants_TEST/
 data/metadata/variants_TEST_v2/
 output/
+
+# --- local run outputs (not versioned) ---
+runs/
+results/
+plots/
+figs/
+data/tmp/
+
+# --- metadata variants (multiple naming schemes) ---
+data/metadata/variants_*/
+data/metadata/variants*/**
+data/metadata/*variants*/**
+data/metadata/dfm_*forecasts/
+data/metadata/dfm_grid/
+data/metadata/panels/
+.venv*/
