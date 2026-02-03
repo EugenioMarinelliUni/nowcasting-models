@@ -1,23 +1,27 @@
 from __future__ import annotations
 
+"""
+Numba-accelerated (hybrid) fast ML-EM step for the BM mixed-frequency DFM.
+
+Revisions:
+  - Implement toolbox-aligned quarterly loading base recovery for scaled MM weights
+  - Implement idio_ar1 switch:
+      * True  -> monthly idio states present (AR1), monthly R forced near-zero
+      * False -> no monthly idio states (iid), monthly R estimated
+  - Fix VAR stability call: pass ppC
+"""
+
 from dataclasses import dataclass
-from typing import Tuple, Optional, Sequence, List
+from typing import Optional, Sequence, Tuple
 
 import numpy as np
 
 from dfm_pipeline.dfm_dyn.state_space import StateSpaceParams, kalman_filter_smoother
-
 from ..constraints import toolbox_R_mat, kron_quarterly_constraints
 from .constraints_fast import constrained_ls_fast
 from ..state_builder import BMParams, build_state_space
 from ..steady_state import safe_sym
-
-from .numba_kernels import (
-    NUMBA_AVAILABLE,
-    accumulate_Sxx_Syx,
-    accumulate_Q_acc,
-    update_rho_sig2_from_diag,
-)
+from .numba_kernels import accumulate_Sxx_Syx
 
 
 def _clip_rho(rho: np.ndarray, cap: float = 0.999) -> np.ndarray:
@@ -29,27 +33,34 @@ def _floor(x: np.ndarray, floor: float) -> np.ndarray:
 
 
 def _compute_Ezz_fast(a_smooth: np.ndarray, P_smooth: np.ndarray) -> np.ndarray:
-    """Vectorized Ezz[t] = P[t] + a[t] a[t]'."""
     return P_smooth + a_smooth[:, :, None] * a_smooth[:, None, :]
 
 
-def _submat(A: np.ndarray, rows: np.ndarray, cols: np.ndarray) -> np.ndarray:
-    """Fast alternative to A[np.ix_(rows, cols)]."""
-    return A[rows[:, None], cols]
+def _submat_sq(M: np.ndarray, idx: np.ndarray) -> np.ndarray:
+    out = np.zeros((idx.size, idx.size), dtype=float)
+    for i in range(idx.size):
+        ii = idx[i]
+        for j in range(idx.size):
+            jj = idx[j]
+            out[i, j] = M[ii, jj]
+    return out
 
 
-def _submat_sq(A: np.ndarray, idx: np.ndarray) -> np.ndarray:
-    """Fast alternative to A[np.ix_(idx, idx)]."""
-    return A[idx[:, None], idx]
+def _submat(M: np.ndarray, rows: np.ndarray, cols: np.ndarray) -> np.ndarray:
+    out = np.zeros((rows.size, cols.size), dtype=float)
+    for i in range(rows.size):
+        ii = rows[i]
+        for j in range(cols.size):
+            jj = cols[j]
+            out[i, j] = M[ii, jj]
+    return out
 
 
 @dataclass(frozen=True)
 class EMStepCache:
-    """Precomputations that depend only on model dimensions / block structure."""
-    r_total: int
     monthly_sel_factors: Tuple[np.ndarray, ...]
-    R_con: Optional[np.ndarray] = None
-    q_con: Optional[np.ndarray] = None
+    R_con: Optional[np.ndarray]
+    q_con: Optional[np.ndarray]
 
 
 def build_em_cache(
@@ -67,13 +78,13 @@ def build_em_cache(
         monthly_sel = tuple(np.arange(r_total, dtype=int) for _ in range(nM))
     else:
         blocks_eff = blocks.astype(int)
-        block_factor_ranges: List[tuple[int, int]] = []
+        block_factor_ranges = []
         c = 0
         for rb in r_by_block:
             block_factor_ranges.append((c, c + rb))
             c += rb
 
-        monthly_sel_list: List[np.ndarray] = []
+        monthly_sel_list = []
         for i in range(nM):
             block_row = blocks_eff[i]
             allow = np.zeros((r_total,), dtype=bool)
@@ -84,14 +95,15 @@ def build_em_cache(
             monthly_sel_list.append(sel)
         monthly_sel = tuple(monthly_sel_list)
 
-    R_con = None
-    q_con = None
     if enforce_q_loading_constraint and nQ > 0:
         R_mat, _ = toolbox_R_mat()
         R_con = kron_quarterly_constraints(R_mat, r_total)
         q_con = np.zeros((R_con.shape[0],), dtype=float)
+    else:
+        R_con = None
+        q_con = None
 
-    return EMStepCache(r_total=r_total, monthly_sel_factors=monthly_sel, R_con=R_con, q_con=q_con)
+    return EMStepCache(monthly_sel_factors=monthly_sel, R_con=R_con, q_con=q_con)
 
 
 def em_step_ml_fast_numba(
@@ -104,28 +116,20 @@ def em_step_ml_fast_numba(
     ppC: int,
     mm_style: str,
     quarterly_meas_var_floor: float,
+    monthly_meas_var_floor: float,
+    idio_ar1: bool,
+    force_var_stability: bool,
+    var_stability_shrink: float,
     min_var: float,
     jitter: float,
     enforce_q_loading_constraint: bool,
     fix_quarterly_R: bool,
     blocks: Optional[np.ndarray],
-    cache: Optional[EMStepCache] = None,
+    cache: EMStepCache,
 ) -> Tuple[BMParams, float, np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Numba-accelerated variant of the fast EM step.
-    Returns: (new_params, loglik, a_smooth, P_smooth, P_lag_smooth)
-    """
+
     r_by_block = tuple(int(x) for x in r_by_block)
     r_total = int(sum(r_by_block))
-
-    if cache is None:
-        cache = build_em_cache(
-            nM=nM,
-            nQ=nQ,
-            r_by_block=r_by_block,
-            blocks=blocks,
-            enforce_q_loading_constraint=enforce_q_loading_constraint,
-        )
 
     Tm, Qm, C, R, a0, P0, idx = build_state_space(
         params=params,
@@ -136,6 +140,8 @@ def em_step_ml_fast_numba(
         ppC=ppC,
         mm_style=mm_style,
         quarterly_meas_var_floor=quarterly_meas_var_floor,
+        monthly_meas_var_floor=monthly_meas_var_floor,
+        idio_ar1=bool(idio_ar1),
         jitter=jitter,
     )
 
@@ -175,141 +181,101 @@ def em_step_ml_fast_numba(
             Q_f_blocks_new.append(params.Q_f_blocks[b].copy())
             continue
 
-        # S_xx / S_yx
-        if NUMBA_AVAILABLE:
-            S_xx, S_yx = accumulate_Sxx_Syx(
-                Ezz,
-                P_lag,
-                a,
-                f0.astype(np.int64),
-                lag_stack.astype(np.int64),
-            )
-        else:
-            S_xx = np.zeros((rb * p, rb * p), dtype=float)
-            S_yx = np.zeros((rb, rb * p), dtype=float)
-            for t in range(1, Y.shape[0]):
-                cross = P_lag[t] + np.outer(a[t], a[t - 1])
-                S_yx += _submat(cross, f0, lag_stack)
-                S_xx += _submat_sq(Ezz[t - 1], lag_stack)
-
+        S_xx, S_yx = accumulate_Sxx_Syx(Ezz, P_lag, a, f0, lag_stack)
         S_xx = safe_sym(S_xx) + np.eye(S_xx.shape[0], dtype=float) * min_var
-        Phi_stack = np.linalg.solve(S_xx, S_yx.T).T
-        Phi_b_new: list[np.ndarray] = [Phi_stack[:, lag * rb : (lag + 1) * rb] for lag in range(p)]
-        Phi_blocks_new.append(Phi_b_new)
+        B = S_yx @ np.linalg.inv(S_xx)
+        Phi_list = [B[:, lag * rb:(lag + 1) * rb].copy() for lag in range(p)]
 
-        # Q update
-        if NUMBA_AVAILABLE:
-            Q_acc, count = accumulate_Q_acc(
-                Ezz,
-                P_lag,
-                a,
-                f0.astype(np.int64),
-                lag_stack.astype(np.int64),
-                Phi_stack,
+        Qf = np.zeros((rb, rb), dtype=float)
+        for t in range(1, Y.shape[0]):
+            Ey = _submat_sq(Ezz[t], f0)
+            Eyx = _submat(P_lag[t], f0, lag_stack) + np.outer(a[t, f0], a[t - 1, lag_stack])
+            Exx = _submat_sq(Ezz[t - 1], lag_stack)
+            Qf += Ey - Eyx @ B.T - B @ Eyx.T + B @ Exx @ B.T
+        Qf = safe_sym(Qf / max(Y.shape[0] - 1, 1)) + np.eye(rb, dtype=float) * min_var
+
+        if force_var_stability and p > 0:
+            from ..stability import enforce_var_stability
+            Phi_list = enforce_var_stability(
+                Phi_list,
+                ppC=int(ppC),
+                shrink=float(var_stability_shrink),
             )
-        else:
-            Q_acc = np.zeros((rb, rb), dtype=float)
-            count = 0
-            for t in range(1, Y.shape[0]):
-                Eff = _submat_sq(Ezz[t], f0)
-                cross = P_lag[t] + np.outer(a[t], a[t - 1])
-                Efl = _submat(cross, f0, lag_stack)
-                Ell = _submat_sq(Ezz[t - 1], lag_stack)
-                Q_acc += Eff - Phi_stack @ Efl.T - Efl @ Phi_stack.T + Phi_stack @ Ell @ Phi_stack.T
-                count += 1
 
-        Q_b = safe_sym(Q_acc / max(count, 1))
-        d = np.diag(Q_b)
-        Q_b[np.diag_indices_from(Q_b)] = _floor(d, min_var)
-        Q_b = np.atleast_2d(Q_b)
-        Q_f_blocks_new.append(Q_b)
+        Phi_blocks_new.append(Phi_list)
+        Q_f_blocks_new.append(Qf)
 
     # -----------------------------
-    # Update monthly idiosyncratic AR(1) and stationary variance
+    # Monthly idio AR(1) update (only if idio_ar1)
     # -----------------------------
     rho_m_new = params.rho_m.copy().astype(float)
     sig2_m_new = params.sig2_m.copy().astype(float)
 
-    for i in range(nM):
+    for i in (range(nM) if bool(idio_ar1) else range(0)):
         s_idx = idx_m.start + i
-        if NUMBA_AVAILABLE:
-            rho, s2 = update_rho_sig2_from_diag(
-                Ezz[:, s_idx, s_idx],
-                P_lag[:, s_idx, s_idx],
-                a[:, s_idx],
-                min_var=min_var,
-            )
-            rho_m_new[i] = float(np.clip(rho, -0.999, 0.999))
-            sig2_m_new[i] = float(max(s2, min_var))
-        else:
-            num = 0.0
-            den = 0.0
-            for t in range(1, Y.shape[0]):
-                cross = P_lag[t][s_idx, s_idx] + a[t, s_idx] * a[t - 1, s_idx]
-                prev = Ezz[t - 1][s_idx, s_idx]
-                num += float(cross)
-                den += float(prev)
-            if den > 0.0:
-                rho_m_new[i] = num / den
-            rho_m_new[i] = float(np.clip(rho_m_new[i], -0.999, 0.999))
-            sig2_m_new[i] = float(max(np.mean(Ezz[:, s_idx, s_idx]), min_var))
+        num = 0.0
+        den = 0.0
+        for t in range(1, Y.shape[0]):
+            cross = P_lag[t][s_idx, s_idx] + a[t, s_idx] * a[t - 1, s_idx]
+            prev = Ezz[t - 1][s_idx, s_idx]
+            num += float(cross)
+            den += float(prev)
+        if den > 0.0:
+            rho_m_new[i] = num / den
+        rho_m_new[i] = float(np.clip(rho_m_new[i], -0.999, 0.999))
+        sig2_m_new[i] = float(max(np.mean(Ezz[:, s_idx, s_idx]), min_var))
 
     # -----------------------------
-    # Update quarterly idiosyncratic AR(1) and stationary variance (first state only)
+    # Quarterly idio AR(1) update (first state only)
     # -----------------------------
     rho_q_new = params.rho_q.copy().astype(float)
     sig2_q_new = params.sig2_q.copy().astype(float)
 
     for j in range(nQ):
         s0 = idx_q.start + 5 * j
-        if NUMBA_AVAILABLE:
-            rho, s2 = update_rho_sig2_from_diag(
-                Ezz[:, s0, s0],
-                P_lag[:, s0, s0],
-                a[:, s0],
-                min_var=min_var,
-            )
-            rho_q_new[j] = float(np.clip(rho, -0.999, 0.999))
-            sig2_q_new[j] = float(max(s2, min_var))
-        else:
-            num = 0.0
-            den = 0.0
-            for t in range(1, Y.shape[0]):
-                cross = P_lag[t][s0, s0] + a[t, s0] * a[t - 1, s0]
-                prev = Ezz[t - 1][s0, s0]
-                num += float(cross)
-                den += float(prev)
-            if den > 0.0:
-                rho_q_new[j] = num / den
-            rho_q_new[j] = float(np.clip(rho_q_new[j], -0.999, 0.999))
-            sig2_q_new[j] = float(max(np.mean(Ezz[:, s0, s0]), min_var))
+        num = 0.0
+        den = 0.0
+        for t in range(1, Y.shape[0]):
+            cross = P_lag[t][s0, s0] + a[t, s0] * a[t - 1, s0]
+            prev = Ezz[t - 1][s0, s0]
+            num += float(cross)
+            den += float(prev)
+        if den > 0.0:
+            rho_q_new[j] = num / den
+        rho_q_new[j] = float(np.clip(rho_q_new[j], -0.999, 0.999))
+        sig2_q_new[j] = float(max(np.mean(Ezz[:, s0, s0]), min_var))
 
     # -----------------------------
-    # Update monthly loadings Lambda_m with block restrictions
+    # Monthly loadings update
     # -----------------------------
     Lambda_m_new = params.Lambda_m.copy().astype(float)
 
     for i in range(nM):
-        sel = cache.monthly_sel_factors[i]
-        if sel.size == 0:
-            continue
-
         y_i = Y[:, i]
         obs_idx = np.where(~np.isnan(y_i))[0]
         if obs_idx.size == 0:
             continue
 
+        sel = cache.monthly_sel_factors[i]
+        if sel.size == 0:
+            continue
+
         f_sel_idx = f_t_idx[sel]
+
         denom = np.zeros((sel.size, sel.size), dtype=float)
         nom = np.zeros((sel.size,), dtype=float)
-        s_idio = idx_m.start + i
+        has_m_idio = bool(idio_ar1)
+        s_idio = (idx_m.start + i) if has_m_idio else -1
 
         for t in obs_idx:
             denom += _submat_sq(Ezz[t], f_sel_idx)
 
             Ef = a[t, f_sel_idx]
-            Eif = (P[t][s_idio, f_sel_idx] + a[t, s_idio] * a[t, f_sel_idx])
-            nom += y_i[t] * Ef - Eif
+            if has_m_idio:
+                Eif = (P[t][s_idio, f_sel_idx] + a[t, s_idio] * a[t, f_sel_idx])
+                nom += y_i[t] * Ef - Eif
+            else:
+                nom += y_i[t] * Ef
 
         denom = safe_sym(denom) + np.eye(sel.size, dtype=float) * min_var
         sol = np.linalg.solve(denom, nom)
@@ -318,7 +284,7 @@ def em_step_ml_fast_numba(
         Lambda_m_new[i, sel] = sol
 
     # -----------------------------
-    # Update quarterly loadings Lambda_q under toolbox constraints
+    # Quarterly loadings under toolbox constraints
     # -----------------------------
     Lambda_q_new = params.Lambda_q.copy().astype(float)
 
@@ -350,17 +316,22 @@ def em_step_ml_fast_numba(
 
             denom = safe_sym(denom) + np.eye(denom.shape[0], dtype=float) * min_var
 
-            if enforce_q_loading_constraint:
-                if cache.R_con is None or cache.q_con is None:
-                    raise RuntimeError("Quarterly constraint cache missing.")
-                C_con = constrained_ls_fast(denom, nom, cache.R_con, cache.q_con)
-            else:
-                C_con = np.linalg.solve(denom, nom)
+            if not enforce_q_loading_constraint:
+                raise ValueError(
+                    "Unconstrained quarterly loadings require a 5-lag loading parameterization. "
+                    "Set enforce_q_loading_constraint=True for toolbox parity."
+                )
+            if cache.R_con is None or cache.q_con is None:
+                raise RuntimeError("Quarterly constraint cache missing.")
+            C_con = constrained_ls_fast(denom, nom, cache.R_con, cache.q_con)
 
-            Lambda_q_new[j, :] = C_con[0:r_total]
+            w0 = float(C[row, idio_idx][0])
+            if w0 == 0.0:
+                raise ValueError("MM weight w0 is zero; cannot recover base quarterly loading.")
+            Lambda_q_new[j, :] = C_con[0:r_total] / w0
 
     # -----------------------------
-    # Update diagonal measurement noise R
+    # Measurement noise update
     # -----------------------------
     R_diag_m_new = params.R_diag_m.copy().astype(float)
     R_diag_q_new = params.R_diag_q.copy().astype(float)
@@ -378,18 +349,19 @@ def em_step_ml_fast_numba(
         C_row = np.zeros((Tm.shape[0],), dtype=float)
 
         if i < nM:
-            C_row[idx.f_t_idx] = Lambda_m_new[i, :]
-            C_row[idx_m.start + i] = 1.0
+            C_row[f_t_idx] = Lambda_m_new[i, :]
+            if bool(idio_ar1):
+                C_row[idx_m.start + i] = 1.0
         else:
             j = i - nM
-            idio_idx2 = np.arange(idx_q.start + 5 * j, idx_q.start + 5 * (j + 1), dtype=int)
-            w = C[i, idio_idx2].copy()
+            idio_idx = np.arange(idx_q.start + 5 * j, idx_q.start + 5 * (j + 1), dtype=int)
+            w = C[i, idio_idx].copy()
             pos = 0
             for lag in range(5):
-                lag_idx = f_stack_idx[pos : pos + r_total]
+                lag_idx = f_stack_idx[pos:pos + r_total]
                 C_row[lag_idx] = w[lag] * Lambda_q_new[j, :]
                 pos += r_total
-            C_row[idio_idx2] = w
+            C_row[idio_idx] = w
 
         acc = 0.0
         for t in obs_idx:
@@ -404,6 +376,9 @@ def em_step_ml_fast_numba(
         else:
             R_diag_q_new[i - nM] = max(var, quarterly_meas_var_floor)
 
+    if bool(idio_ar1):
+        R_diag_m_new = np.full((nM,), float(monthly_meas_var_floor), dtype=float)
+
     new_params = BMParams(
         Phi_blocks=Phi_blocks_new,
         Q_f_blocks=Q_f_blocks_new,
@@ -413,8 +388,8 @@ def em_step_ml_fast_numba(
         sig2_q=_floor(sig2_q_new, min_var),
         Lambda_m=Lambda_m_new,
         Lambda_q=Lambda_q_new,
-        R_diag_m=_floor(R_diag_m_new, min_var),
-        R_diag_q=_floor(R_diag_q_new, quarterly_meas_var_floor),
+        R_diag_m=_floor(R_diag_m_new, min_var if not bool(idio_ar1) else float(monthly_meas_var_floor)),
+        R_diag_q=_floor(R_diag_q_new, float(quarterly_meas_var_floor)),
     )
 
     return new_params, loglik, a, P, P_lag
