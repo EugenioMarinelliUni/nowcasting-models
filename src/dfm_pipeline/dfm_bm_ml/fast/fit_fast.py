@@ -1,29 +1,18 @@
 from __future__ import annotations
 
-"""Fast fitter for the Banbura–Modugno (2014) mixed-frequency DFM.
-
-This module keeps the same algorithm as :mod:`dfm_pipeline.dfm_bm_ml.fit`, but
-uses:
-
-* PCA init with vectorized forward-fill (see :mod:`dfm_pipeline.dfm_bm_ml.init_fast`).
-* EM step with vectorized Ezz and cached constraint / block structures
-  (see :mod:`dfm_pipeline.dfm_bm_ml.em_fast`).
-
-The original module is preserved for comparison.
-"""
-
 import numpy as np
 from tqdm.auto import tqdm
 
 from ..spec import BMDfmConfig, BMDfmResult
-from .init_fast import standardize_panel, pca_init_factors
+from ..scaling import scale_panel
+from ..init import pca_init_factors
 from ..constraints import mm_sum_sq
+from ..stability import enforce_var_stability
 from ..state_builder import BMParams, build_state_space
-from .em_fast import em_step_ml_fast, build_em_cache, EMStepCache
+from .em_fast import em_step_ml_fast
 
 
 def _fit_var_ols(F: np.ndarray, p: int) -> tuple[list[np.ndarray], np.ndarray]:
-    """Same as in the original fitter."""
     Tn, r = F.shape
     if p == 0:
         return [], np.eye(r, dtype=float) * 0.1
@@ -42,14 +31,12 @@ def _fit_var_ols(F: np.ndarray, p: int) -> tuple[list[np.ndarray], np.ndarray]:
 
 
 def fit_bm_dfm_fast(
-    Y_monthly: np.ndarray,  # (T, nM) with NaNs
-    y_quarterly: np.ndarray,  # (T,) with NaNs except quarter-end months
+    Y_monthly: np.ndarray,
+    y_quarterly: np.ndarray,
     config: BMDfmConfig,
     *,
-    init_params: BMParams | None = None,           # NEW: warm-start
-    em_cache: EMStepCache | None = None,           # NEW: reuse cache across pseudo-RT months
+    init_params: BMParams | None = None,
 ) -> BMDfmResult:
-    """Fit the BM-DFM using the same logic as :func:`fit_bm_dfm`, faster."""
     if config.p > 5:
         raise ValueError("Toolbox parity requires p <= 5 (MF constraints).")
     if int(config.n_quarterly) != 1:
@@ -61,47 +48,53 @@ def fit_bm_dfm_fast(
     ppC = 5
 
     Y = np.column_stack([Y_monthly, y_quarterly.reshape(-1, 1)]).astype(float)
-    if config.standardize:
-        Y, _, _ = standardize_panel(Y)
+
+    # Scaling
+    Y, scaler = scale_panel(Y, mode=config.scaling_mode)
 
     r_by_block = tuple(int(x) for x in config.r_by_block)
     r_total = int(sum(r_by_block))
     if r_total <= 0:
         raise ValueError("sum(r_by_block) must be positive.")
 
-    # ------------------------------------------------------------
-    # Initialization:
-    #   - If init_params is provided: warm-start EM from those params
-    #   - Else: PCA init (same as before)
-    # ------------------------------------------------------------
     if init_params is None:
-        # PCA init on monthly panel only
-        F0, Lambda0 = pca_init_factors(Y_monthly, r_total, fill_mode=config.pca_fill)
+        # PCA init on scaled monthly panel
+        F0, Lambda0 = pca_init_factors(Y[:, :nM], r_total, fill_mode=config.pca_fill)
 
-        # Split factors into blocks and fit VAR(p) per block
         Phi_blocks: list[list[np.ndarray]] = []
         Q_f_blocks: list[np.ndarray] = []
-
         cursor = 0
         for rb in r_by_block:
             Fb = F0[:, cursor:cursor + rb]
             Phi_b, Q_b = _fit_var_ols(Fb, p=p)
+            if bool(config.force_var_stability) and p > 0:
+                Phi_b = enforce_var_stability(
+                    Phi_b,
+                    ppC=int(ppC),
+                    shrink=float(config.var_stability_shrink),
+                )
             Phi_blocks.append(Phi_b)
             Q_f_blocks.append(Q_b)
             cursor += rb
 
         rho_m = np.full((nM,), float(config.rho_idio_init), dtype=float)
         sig2_m = np.full((nM,), 1.0, dtype=float)
+
         rho_q = np.full((nQ,), float(config.rho_idio_init), dtype=float)
         sig2_q = np.full((nQ,), 1.0, dtype=float)
 
         Lambda_m = Lambda0.copy().astype(float)
+
         Lambda_q = np.zeros((nQ, r_total), dtype=float)
         obs_q = ~np.isnan(Y[:, nM])
         if np.any(obs_q):
             Lambda_q[0, :] = np.linalg.lstsq(F0[obs_q, :], Y[obs_q, nM], rcond=None)[0]
 
-        R_diag_m = np.full((nM,), 0.5, dtype=float)
+        if bool(config.idio_ar1):
+            R_diag_m = np.full((nM,), float(config.monthly_meas_var_floor), dtype=float)
+        else:
+            R_diag_m = np.full((nM,), 0.5, dtype=float)
+
         R_diag_q = np.full((nQ,), float(config.quarterly_meas_var_floor), dtype=float)
 
         if np.any(obs_q):
@@ -129,20 +122,6 @@ def fit_bm_dfm_fast(
     else:
         params = init_params
 
-    # ------------------------------------------------------------
-    # Cache invariants for EM steps
-    #   - If em_cache provided: reuse it
-    #   - Else build it (same as before)
-    # ------------------------------------------------------------
-    if em_cache is None:
-        em_cache = build_em_cache(
-            nM=nM,
-            nQ=nQ,
-            r_by_block=r_by_block,
-            blocks=config.blocks,
-            enforce_q_loading_constraint=bool(config.enforce_quarterly_loading_constraint),
-        )
-
     loglik_trace: list[float] = []
     a_last = None
     P_last = None
@@ -160,12 +139,15 @@ def fit_bm_dfm_fast(
             ppC=ppC,
             mm_style=config.mm_weight_style,
             quarterly_meas_var_floor=float(config.quarterly_meas_var_floor),
+            monthly_meas_var_floor=float(config.monthly_meas_var_floor),
+            idio_ar1=bool(config.idio_ar1),
+            force_var_stability=bool(config.force_var_stability),
+            var_stability_shrink=float(config.var_stability_shrink),
             min_var=float(config.min_var),
             jitter=float(config.jitter),
             enforce_q_loading_constraint=bool(config.enforce_quarterly_loading_constraint),
             fix_quarterly_R=bool(config.fix_quarterly_R),
             blocks=config.blocks,
-            cache=em_cache,
         )
         loglik_trace.append(float(ll))
 
@@ -175,6 +157,7 @@ def fit_bm_dfm_fast(
 
         delta = loglik_trace[-1] - loglik_trace[-2]
         pbar.set_postfix_str(f"loglik={ll:.2f}, dLL={delta:.3e}")
+
         if it >= 2 and abs(delta) < float(config.tol):
             pbar.set_postfix_str(f"loglik={ll:.2f}, converged")
             break
@@ -188,12 +171,15 @@ def fit_bm_dfm_fast(
         ppC=ppC,
         mm_style=config.mm_weight_style,
         quarterly_meas_var_floor=float(config.quarterly_meas_var_floor),
+        monthly_meas_var_floor=float(config.monthly_meas_var_floor),
+        idio_ar1=bool(config.idio_ar1),
         jitter=float(config.jitter),
     )
 
     return BMDfmResult(
         config=config,
         loglik_trace=loglik_trace,
+        scaler=scaler,
         T=Tm,
         Q=Qm,
         C=Cm,
@@ -208,5 +194,5 @@ def fit_bm_dfm_fast(
         idx_idio_quarterly=idx.idx_idio_quarterly,
         f_t_idx=idx.f_t_idx,
         f_stack_idx=idx.f_stack_idx,
-        params_final=params,   # NEW
+        params_final=params,
     )
