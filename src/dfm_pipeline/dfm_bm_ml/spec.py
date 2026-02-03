@@ -7,14 +7,15 @@ import numpy as np
 
 if TYPE_CHECKING:
     from .state_builder import BMParams
+    from .scaling import PanelScaler
 
 
 @dataclass(frozen=True)
 class BMDfmConfig:
     # Factors
-    r_by_block: Sequence[int]                         # number of factors per block
-    p: int                                            # factor VAR lags (must satisfy p<=5 for toolbox MF constraints)
-    blocks: Optional[np.ndarray] = None               # shape (n_obs, n_blocks), binary; if None -> single block
+    r_by_block: Sequence[int]
+    p: int
+    blocks: Optional[np.ndarray] = None
 
     # Idiosyncratic components
     idio_ar1: bool = True
@@ -25,7 +26,10 @@ class BMDfmConfig:
     mm_weight_style: Literal["toolbox", "scaled"] = "toolbox"
     quarterly_meas_var_floor: float = 1e-4
     enforce_quarterly_loading_constraint: bool = True
-    fix_quarterly_R: bool = True                      # toolbox effectively fixes quarterly R near zero
+    fix_quarterly_R: bool = True
+
+    # Near-zero monthly measurement variance when idios are in the state (toolbox behavior)
+    monthly_meas_var_floor: float = 1e-4
 
     # EM control
     max_iter: int = 200
@@ -35,17 +39,25 @@ class BMDfmConfig:
 
     # Initialization
     pca_fill: Literal["mean", "ffill"] = "mean"
-    standardize: bool = True
 
-    # Numerical safeguards
+    # Scaling modes
+    scaling_mode: Literal["external_frozen", "internal_per_run"] = "internal_per_run"
+
+    # VAR stability
     force_var_stability: bool = True
     var_stability_shrink: float = 0.98
+
+    # NEW: toolbox parity for initial state handling
+    P0_mode: Literal["diffuse", "steady_state"] = "steady_state"
+    update_initial_state_each_iter: bool = True
 
 
 @dataclass
 class BMDfmResult:
     config: BMDfmConfig
     loglik_trace: list[float]
+
+    scaler: "PanelScaler"
 
     # Final state-space params
     T: np.ndarray
@@ -56,16 +68,15 @@ class BMDfmResult:
     P0: np.ndarray
 
     # Smoothed outputs at optimum
-    a_smooth: np.ndarray          # (T, m)
-    P_smooth: np.ndarray          # (T, m, m)
-    P_lag_smooth: np.ndarray      # (T, m, m)
+    a_smooth: np.ndarray
+    P_smooth: np.ndarray
+    P_lag_smooth: np.ndarray
 
     # Index helpers
     idx_factors: slice
     idx_idio_monthly: slice
     idx_idio_quarterly: slice
-    f_t_idx: np.ndarray           # (r_total,) state indices for contemporaneous factors (concatenated by blocks)
-    f_stack_idx: np.ndarray       # (5*r_total,) state indices for [t,t-1,t-2,t-3,t-4] factor stack
+    f_t_idx: np.ndarray
+    f_stack_idx: np.ndarray
 
-    # NEW: store final BMParams to enable warm-start in pseudo-RT evaluation
     params_final: Optional["BMParams"] = None
