@@ -1,254 +1,107 @@
 from __future__ import annotations
 
 import argparse
-import json
-from dataclasses import fields, is_dataclass
 from pathlib import Path
-from typing import Any, Dict
 
+import numpy as np
 import pandas as pd
 
-from dfm_pipeline.dfm_bm_ml.spec import BMDfmConfig
-from dfm_pipeline.dfm_bm_ml.fast import fit_bm_dfm_fast_numba as fit_bm_dfm_fast
-from dfm_pipeline.eval_pseudort.bm_pseudort import PseudoRTEvalConfig
-from dfm_pipeline.eval_pseudort.fast import run_pseudo_rt_eval_fast
+from src.dfm_pipeline.dfm_bm_ml.fast.fit_fast_numba import fit_bm_dfm_fast_numba
+from src.dfm_pipeline.dfm_bm_ml.spec import BMDfmConfig
 
 
-def _filter_kwargs_for_dataclass(cls: Any, kwargs: Dict[str, Any]) -> Dict[str, Any]:
-    """Return only kwargs that are valid fields for the given dataclass `cls`.
+def _parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser()
+    p.add_argument("--monthly_csv", type=str, required=True)
+    p.add_argument("--quarterly_csv", type=str, required=True)
+    p.add_argument("--out_dir", type=str, required=True)
 
-    This makes the script robust if the dataclass differs slightly across versions.
-    """
-    if not is_dataclass(cls):
-        return kwargs
-    valid = {f.name for f in fields(cls)}
-    return {k: v for k, v in kwargs.items() if k in valid}
+    p.add_argument("--r_by_block", type=int, nargs="+", required=True)
+    p.add_argument("--p", type=int, required=True)
 
+    p.add_argument("--standardize", action="store_true", default=False)
+    p.add_argument("--no-standardize", dest="standardize", action="store_false")
 
-def _load_panel(panel_csv: str, date_col: str) -> pd.DataFrame:
-    X = pd.read_csv(panel_csv)
-    if date_col not in X.columns:
-        raise ValueError(f"date_col='{date_col}' not found in panel CSV columns.")
-    X[date_col] = pd.to_datetime(X[date_col])
-    X = X.set_index(date_col).sort_index()
-    return X
+    p.add_argument("--pca_fill", type=str, default="mean", choices=["mean", "ffill"])
 
+    p.add_argument("--rho_idio_init", type=float, default=0.10)
+    p.add_argument("--max_iter", type=int, default=200)
+    p.add_argument("--tol", type=float, default=1e-6)
 
-def _load_target(target_csv: str, date_col: str, target_col: str) -> pd.Series:
-    y = pd.read_csv(target_csv)
-    if date_col not in y.columns:
-        raise ValueError(f"date_col='{date_col}' not found in target CSV columns.")
-    if target_col not in y.columns:
-        raise ValueError(f"target_col='{target_col}' not found in target CSV columns.")
-    y[date_col] = pd.to_datetime(y[date_col])
-    y = y.set_index(date_col).sort_index()
-    return y[target_col]
+    p.add_argument("--force_var_stability", action="store_true", default=True)
+    p.add_argument("--no-force_var_stability", dest="force_var_stability", action="store_false")
+    p.add_argument("--var_stability_shrink", type=float, default=0.98)
+
+    p.add_argument("--monthly_meas_var_floor", type=float, default=1e-4)
+    p.add_argument("--quarterly_meas_var_floor", type=float, default=1e-4)
+
+    p.add_argument("--date_from", type=str, required=True)
+    p.add_argument("--date_to", type=str, required=True)
+
+    return p.parse_args()
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Pseudo-real-time evaluation of the BM-DFM (fast implementation).",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
+    args = _parse_args()
 
-    # Inputs / outputs
-    parser.add_argument("--panel-csv", required=True, help="Path to monthly panel CSV (X).")
-    parser.add_argument("--target-csv", required=True, help="Path to target CSV (y on monthly index).")
-    parser.add_argument("--date-col", default="sasdate", help="Name of date column in both CSV files.")
-    parser.add_argument("--target-col", required=True, help="Name of target column in target CSV.")
-    parser.add_argument("--outdir", required=True, help="Output directory for predictions and scores.")
+    X = pd.read_csv(args.monthly_csv, index_col=0, parse_dates=True)
+    yq = pd.read_csv(args.quarterly_csv, index_col=0, parse_dates=True).iloc[:, 0]
+    yq = yq.reindex(X.index)
 
-    # Model params
-    parser.add_argument("--r", type=int, required=True, help="Number of factors (single block => r_by_block=(r,)).")
-    parser.add_argument("--p", type=int, required=True, help="Factor VAR lag order.")
-    parser.add_argument("--mm-style", choices=["toolbox", "scaled"], default="toolbox", help="Mariano-Murasawa style.")
-    parser.add_argument("--max-iter", type=int, default=200, help="Maximum EM iterations per refit.")
-    parser.add_argument("--tol", type=float, default=1e-6, help="Convergence tolerance on dLL.")
+    date_from = pd.Timestamp(args.date_from)
+    date_to = pd.Timestamp(args.date_to)
+    eval_idx = X.loc[date_from:date_to].index
 
-    parser.add_argument(
-        "--enforce-quarterly-loading-constraint",
-        dest="enforce_q_loading_constraint",
-        action="store_true",
-        help="Enforce toolbox-style quarterly loading constraints.",
-    )
-    parser.add_argument(
-        "--no-enforce-quarterly-loading-constraint",
-        dest="enforce_q_loading_constraint",
-        action="store_false",
-        help="Disable quarterly loading constraints.",
-    )
-    parser.set_defaults(enforce_q_loading_constraint=False)
+    scaling_mode = "internal_per_run" if bool(args.standardize) else "external_frozen"
 
-    parser.add_argument(
-        "--fix-quarterly-R",
-        dest="fix_quarterly_R",
-        action="store_true",
-        help="Fix quarterly measurement variance to floor (toolbox-like).",
-    )
-    parser.add_argument(
-        "--no-fix-quarterly-R",
-        dest="fix_quarterly_R",
-        action="store_false",
-        help="Do not fix quarterly measurement variance (estimate it).",
-    )
-    parser.set_defaults(fix_quarterly_R=False)
-
-    std_group = parser.add_mutually_exclusive_group()
-    std_group.add_argument(
-        "--standardize",
-        dest="standardize",
-        action="store_true",
-        help="Standardize Y inside the fitter (use if inputs are not z-scored).",
-    )
-    std_group.add_argument(
-        "--no-standardize",
-        dest="standardize",
-        action="store_false",
-        help="Disable internal standardization (use if inputs are already z-scored).",
-    )
-    parser.set_defaults(standardize=False)
-
-    # Evaluation window
-    parser.add_argument("--eval-start", required=True, help="Evaluation start date (YYYY-MM-DD).")
-    parser.add_argument("--eval-end", required=True, help="Evaluation end date (YYYY-MM-DD).")
-
-    # Ragged edge / delays
-    parser.add_argument(
-        "--delay-style",
-        choices=["none", "trailing_nan", "json_map"],
-        default="none",
-        help="Ragged-edge simulation style.",
-    )
-    parser.add_argument("--delay-json", default=None, help="JSON file for delays (required if delay-style=json_map).")
-    parser.add_argument("--gdp-rel", type=int, default=0, help="Release lag in months for quarterly target masking.")
-
-    # NEW: Speed toggles (Point A)
-    parser.add_argument(
-        "--warm-start",
-        action="store_true",
-        help="Warm-start EM across evaluation months (sequential; big speed-up).",
-    )
-    parser.add_argument(
-        "--n-jobs",
-        type=int,
-        default=1,
-        help="Parallelize across evaluation months when >1 (not compatible with --warm-start).",
-    )
-    parser.add_argument(
-        "--blas-threads",
-        type=int,
-        default=1,
-        help="BLAS threads per job when using --n-jobs > 1 (avoid oversubscription).",
-    )
-
-    args = parser.parse_args()
-
-    outdir = Path(args.outdir)
-    outdir.mkdir(parents=True, exist_ok=True)
-
-    # -------------------------
-    # Load data
-    # -------------------------
-    X_full = _load_panel(args.panel_csv, args.date_col)
-    y_full = _load_target(args.target_csv, args.date_col, args.target_col)
-
-    # Align on common index
-    common_idx = X_full.index.intersection(y_full.index)
-    if common_idx.empty:
-        raise ValueError("Panel and target have empty intersection after alignment on dates.")
-    X_full = X_full.loc[common_idx]
-    y_full = y_full.loc[common_idx]
-
-    # Ensure numeric dtypes (avoid object columns)
-    X_full = X_full.apply(pd.to_numeric, errors="coerce")
-    y_full = pd.to_numeric(y_full, errors="coerce")
-
-    # -------------------------
-    # Build model config (robustly)
-    # -------------------------
-    model_kwargs = dict(
-        r_by_block=(int(args.r),),
+    config = BMDfmConfig(
+        r_by_block=tuple(int(x) for x in args.r_by_block),
         p=int(args.p),
-        mm_weight_style=str(args.mm_style),
+        idio_ar1=True,
+        rho_idio_init=float(args.rho_idio_init),
+        n_quarterly=1,
+        mm_weight_style="toolbox",
+        quarterly_meas_var_floor=float(args.quarterly_meas_var_floor),
+        monthly_meas_var_floor=float(args.monthly_meas_var_floor),
+        enforce_quarterly_loading_constraint=True,
+        fix_quarterly_R=True,
         max_iter=int(args.max_iter),
         tol=float(args.tol),
-        enforce_quarterly_loading_constraint=bool(args.enforce_q_loading_constraint),
-        fix_quarterly_R=bool(args.fix_quarterly_R),
-        standardize=bool(args.standardize),
-        n_quarterly=1,
-    )
-    model_kwargs = _filter_kwargs_for_dataclass(BMDfmConfig, model_kwargs)
-    model_config = BMDfmConfig(**model_kwargs)
-
-    # -------------------------
-    # Build pseudo-RT eval config (robustly)
-    # -------------------------
-    eval_kwargs: Dict[str, Any] = dict(
-        eval_start=str(args.eval_start),
-        eval_end=str(args.eval_end),
-        delay_style=str(args.delay_style),
-        delay_json=args.delay_json,
-        gdp_rel=int(args.gdp_rel),
-    )
-    # Provide default horizons if supported by dataclass
-    # (matches typical bac/now/for outputs)
-    eval_kwargs.setdefault("horizons", ("bac", "now", "for"))
-    eval_kwargs = _filter_kwargs_for_dataclass(PseudoRTEvalConfig, eval_kwargs)
-    eval_cfg = PseudoRTEvalConfig(**eval_kwargs)
-
-    # -------------------------
-    # Run evaluation
-    # -------------------------
-    pred_df, scores = run_pseudo_rt_eval_fast(
-        X_full=X_full,
-        y_full=y_full,
-        fit_fn=fit_bm_dfm_fast,
-        model_config=model_config,
-        eval_cfg=eval_cfg,
-        warm_start=bool(args.warm_start),
-        n_jobs=int(args.n_jobs),
-        blas_threads=int(args.blas_threads),
+        pca_fill=str(args.pca_fill),
+        scaling_mode=scaling_mode,
+        force_var_stability=bool(args.force_var_stability),
+        var_stability_shrink=float(args.var_stability_shrink),
     )
 
-    # -------------------------
-    # Save outputs
-    # -------------------------
-    pred_path = outdir / "predictions.csv"
-    pred_df.to_csv(pred_path, index=False)
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    scores_path = outdir / "scores.json"
-    with open(scores_path, "w", encoding="utf-8") as f:
-        json.dump(scores, f, indent=2)
+    for dt in eval_idx:
+        mask = X.index <= dt
+        Y_monthly = X.loc[mask].to_numpy(dtype=float)
+        y_quarterly = yq.loc[mask].to_numpy(dtype=float)
 
-    cfg_dump = {
-        "panel_csv": args.panel_csv,
-        "target_csv": args.target_csv,
-        "date_col": args.date_col,
-        "target_col": args.target_col,
-        "outdir": str(outdir),
-        "r": args.r,
-        "p": args.p,
-        "mm_style": args.mm_style,
-        "max_iter": args.max_iter,
-        "tol": args.tol,
-        "standardize": args.standardize,
-        "enforce_quarterly_loading_constraint": args.enforce_q_loading_constraint,
-        "fix_quarterly_R": args.fix_quarterly_R,
-        "eval_start": args.eval_start,
-        "eval_end": args.eval_end,
-        "delay_style": args.delay_style,
-        "delay_json": args.delay_json,
-        "gdp_rel": args.gdp_rel,
-        "warm_start": args.warm_start,
-        "n_jobs": args.n_jobs,
-        "blas_threads": args.blas_threads,
-    }
-    with open(outdir / "run_config.json", "w", encoding="utf-8") as f:
-        json.dump(cfg_dump, f, indent=2)
+        res = fit_bm_dfm_fast_numba(Y_monthly=Y_monthly, y_quarterly=y_quarterly, config=config)
 
-    print(f"[OK] Saved predictions to: {pred_path}")
-    print(f"[OK] Saved scores to:       {scores_path}")
-    print(f"[OK] Saved run config to:   {outdir / 'run_config.json'}")
+        out_path = out_dir / f"bm_dfm_fast_numba_{dt.strftime('%Y-%m-%d')}.npz"
+        np.savez_compressed(
+            out_path,
+            loglik=np.array(res.loglik_trace, dtype=float),
+            a_smooth=res.a_smooth,
+            P_smooth=res.P_smooth,
+            P_lag_smooth=res.P_lag_smooth,
+            T=res.T,
+            Q=res.Q,
+            C=res.C,
+            R=res.R,
+            a0=res.a0,
+            P0=res.P0,
+            scaler_mu=res.scaler.mu,
+            scaler_sd=res.scaler.sd,
+            scaler_mode=np.array([res.scaler.mode], dtype=object),
+            f_t_idx=res.f_t_idx,
+            f_stack_idx=res.f_stack_idx,
+        )
 
 
 if __name__ == "__main__":

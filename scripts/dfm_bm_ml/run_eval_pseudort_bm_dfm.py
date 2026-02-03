@@ -1,126 +1,107 @@
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
-from tqdm.auto import tqdm
 
-from dfm_pipeline.dfm_bm_ml import BMDfmConfig, fit_bm_dfm
-from dfm_pipeline.eval_pseudort.bm_pseudort import (
-    PseudoRTEvalConfig,
-    run_pseudo_rt_eval,
-)
+from src.dfm_pipeline.dfm_bm_ml.fit import fit_bm_dfm
+from src.dfm_pipeline.dfm_bm_ml.spec import BMDfmConfig
 
 
-def _read_panel(path: Path, date_col: str) -> pd.DataFrame:
-    df = pd.read_csv(path)
-    if date_col not in df.columns:
-        raise ValueError(f"Panel missing {date_col!r}. Columns: {list(df.columns)[:10]} ...")
-    df[date_col] = pd.to_datetime(df[date_col])
-    df = df.sort_values(date_col).set_index(date_col)
-    return df
+def _parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser()
+    p.add_argument("--monthly_csv", type=str, required=True)
+    p.add_argument("--quarterly_csv", type=str, required=True)
+    p.add_argument("--out_dir", type=str, required=True)
 
+    p.add_argument("--r_by_block", type=int, nargs="+", required=True)
+    p.add_argument("--p", type=int, required=True)
 
-def _read_target(path: Path, date_col: str, target_col: str) -> pd.Series:
-    df = pd.read_csv(path)
-    if date_col not in df.columns:
-        raise ValueError(f"Target missing {date_col!r}. Columns: {list(df.columns)[:10]} ...")
-    if target_col not in df.columns:
-        raise ValueError(f"Target missing {target_col!r}. Columns: {list(df.columns)[:10]} ...")
-    df[date_col] = pd.to_datetime(df[date_col])
-    df = df.sort_values(date_col).set_index(date_col)
-    return df[target_col].astype(float)
+    p.add_argument("--standardize", action="store_true", default=False)
+    p.add_argument("--no-standardize", dest="standardize", action="store_false")
+
+    p.add_argument("--pca_fill", type=str, default="mean", choices=["mean", "ffill"])
+
+    p.add_argument("--rho_idio_init", type=float, default=0.10)
+    p.add_argument("--max_iter", type=int, default=200)
+    p.add_argument("--tol", type=float, default=1e-6)
+
+    p.add_argument("--force_var_stability", action="store_true", default=True)
+    p.add_argument("--no-force_var_stability", dest="force_var_stability", action="store_false")
+    p.add_argument("--var_stability_shrink", type=float, default=0.98)
+
+    p.add_argument("--monthly_meas_var_floor", type=float, default=1e-4)
+    p.add_argument("--quarterly_meas_var_floor", type=float, default=1e-4)
+
+    p.add_argument("--date_from", type=str, required=True)
+    p.add_argument("--date_to", type=str, required=True)
+
+    return p.parse_args()
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser()
+    args = _parse_args()
 
-    ap.add_argument("--panel-csv", required=True, type=str)
-    ap.add_argument("--target-csv", required=True, type=str)
-    ap.add_argument("--date-col", default="sasdate", type=str)
-    ap.add_argument("--target-col", required=True, type=str)
+    X = pd.read_csv(args.monthly_csv, index_col=0, parse_dates=True)
+    yq = pd.read_csv(args.quarterly_csv, index_col=0, parse_dates=True).iloc[:, 0]
+    yq = yq.reindex(X.index)
 
-    ap.add_argument("--outdir", required=True, type=str)
+    date_from = pd.Timestamp(args.date_from)
+    date_to = pd.Timestamp(args.date_to)
+    eval_idx = X.loc[date_from:date_to].index
 
-    # model hyperparameters
-    ap.add_argument("--r", required=True, type=int)
-    ap.add_argument("--p", required=True, type=int)
-    ap.add_argument("--mm-style", default="toolbox", choices=["toolbox", "scaled"])
-    ap.add_argument("--max-iter", default=200, type=int)
-    ap.add_argument("--tol", default=1e-6, type=float)
+    scaling_mode = "internal_per_run" if bool(args.standardize) else "external_frozen"
 
-    ap.add_argument("--no-standardize", dest="standardize", action="store_false", default=True)
-    ap.add_argument("--standardize", dest="standardize", action="store_true")
-
-    ap.add_argument("--no-fix-quarterly-R", dest="fix_quarterly_R", action="store_false", default=True)
-    ap.add_argument("--fix-quarterly-R", dest="fix_quarterly_R", action="store_true")
-
-    ap.add_argument("--no-enforce-quarterly-loading-constraint",
-                    dest="enforce_quarterly_loading_constraint", action="store_false", default=True)
-    ap.add_argument("--enforce-quarterly-loading-constraint",
-                    dest="enforce_quarterly_loading_constraint", action="store_true")
-
-    # evaluation window
-    ap.add_argument("--eval-start", required=True, type=str)  # YYYY-MM-DD
-    ap.add_argument("--eval-end", required=True, type=str)    # YYYY-MM-DD
-
-    # pseudo real-time masking (optional)
-    ap.add_argument("--delay-style", default="none", choices=["none", "trailing_nan", "json_map"])
-    ap.add_argument("--delay-json", default=None, type=str)
-    ap.add_argument("--gdp-rel", default=0, type=int)
-
-    args = ap.parse_args()
-
-    outdir = Path(args.outdir)
-    outdir.mkdir(parents=True, exist_ok=True)
-
-    X = _read_panel(Path(args.panel_csv), date_col=args.date_col)
-    y = _read_target(Path(args.target_csv), date_col=args.date_col, target_col=args.target_col)
-
-    # align target to panel monthly grid
-    y = y.reindex(X.index)
-
-    model_cfg = BMDfmConfig(
-        r_by_block=(int(args.r),),
+    config = BMDfmConfig(
+        r_by_block=tuple(int(x) for x in args.r_by_block),
         p=int(args.p),
-        blocks=None,
-        mm_weight_style=str(args.mm_style),
-        enforce_quarterly_loading_constraint=bool(args.enforce_quarterly_loading_constraint),
-        fix_quarterly_R=bool(args.fix_quarterly_R),
+        idio_ar1=True,
+        rho_idio_init=float(args.rho_idio_init),
+        n_quarterly=1,
+        mm_weight_style="toolbox",
+        quarterly_meas_var_floor=float(args.quarterly_meas_var_floor),
+        monthly_meas_var_floor=float(args.monthly_meas_var_floor),
+        enforce_quarterly_loading_constraint=True,
+        fix_quarterly_R=True,
         max_iter=int(args.max_iter),
         tol=float(args.tol),
-        standardize=bool(args.standardize),
+        pca_fill=str(args.pca_fill),
+        scaling_mode=scaling_mode,
+        force_var_stability=bool(args.force_var_stability),
+        var_stability_shrink=float(args.var_stability_shrink),
     )
 
-    eval_cfg = PseudoRTEvalConfig(
-        eval_start=str(args.eval_start),
-        eval_end=str(args.eval_end),
-        delay_style=str(args.delay_style),
-        delay_json=args.delay_json,
-        gdp_rel=int(args.gdp_rel),
-        horizons=("bac", "now", "for"),
-    )
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    # progress bar over evaluation months
-    # (run_pseudo_rt_eval already loops; wrap at a higher level by monkeypatching tqdm if needed)
-    pred_df, scores = run_pseudo_rt_eval(
-        X_full=X,
-        y_full=y,
-        fit_fn=fit_bm_dfm,
-        model_config=model_cfg,
-        eval_cfg=eval_cfg,
-    )
+    for dt in eval_idx:
+        mask = X.index <= dt
+        Y_monthly = X.loc[mask].to_numpy(dtype=float)
+        y_quarterly = yq.loc[mask].to_numpy(dtype=float)
 
-    pred_path = outdir / "pseudort_predictions.csv"
-    scores_path = outdir / "pseudort_scores.json"
+        res = fit_bm_dfm(Y_monthly=Y_monthly, y_quarterly=y_quarterly, config=config)
 
-    pred_df.to_csv(pred_path, index=False)
-    scores_path.write_text(json.dumps(scores, indent=2, default=str), encoding="utf-8")
-
-    print(str(pred_path))
-    print(str(scores_path))
+        out_path = out_dir / f"bm_dfm_{dt.strftime('%Y-%m-%d')}.npz"
+        np.savez_compressed(
+            out_path,
+            loglik=np.array(res.loglik_trace, dtype=float),
+            a_smooth=res.a_smooth,
+            P_smooth=res.P_smooth,
+            P_lag_smooth=res.P_lag_smooth,
+            T=res.T,
+            Q=res.Q,
+            C=res.C,
+            R=res.R,
+            a0=res.a0,
+            P0=res.P0,
+            scaler_mu=res.scaler.mu,
+            scaler_sd=res.scaler.sd,
+            scaler_mode=np.array([res.scaler.mode], dtype=object),
+            f_t_idx=res.f_t_idx,
+            f_stack_idx=res.f_stack_idx,
+        )
 
 
 if __name__ == "__main__":
