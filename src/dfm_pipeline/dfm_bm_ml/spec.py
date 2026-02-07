@@ -15,7 +15,7 @@ class BMDfmConfig:
     # Factors
     r_by_block: Sequence[int]
     p: int
-    blocks: Optional[np.ndarray] = None
+    blocks: Optional[np.ndarray] = None  # (nM+nQ, n_blocks) with 0/1 entries, or None
 
     # Idiosyncratic components
     idio_ar1: bool = True
@@ -28,7 +28,7 @@ class BMDfmConfig:
     enforce_quarterly_loading_constraint: bool = True
     fix_quarterly_R: bool = True
 
-    # Near-zero monthly measurement variance when idios are in the state (toolbox behavior)
+    # Toolbox behavior: near-zero monthly measurement variance when idios are in the state
     monthly_meas_var_floor: float = 1e-4
 
     # EM control
@@ -47,7 +47,7 @@ class BMDfmConfig:
     force_var_stability: bool = True
     var_stability_shrink: float = 0.98
 
-    # NEW: toolbox parity for initial state handling
+    # Initial state handling (toolbox parity)
     P0_mode: Literal["diffuse", "steady_state"] = "steady_state"
     update_initial_state_each_iter: bool = True
 

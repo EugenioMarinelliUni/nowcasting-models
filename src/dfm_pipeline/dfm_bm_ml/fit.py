@@ -4,15 +4,19 @@ import numpy as np
 from tqdm.auto import tqdm
 
 from .spec import BMDfmConfig, BMDfmResult
-from .init import pca_init_factors
 from .scaling import scale_panel
-from .stability import enforce_var_stability
+from .init import pca_init_factors
 from .constraints import mm_sum_sq
 from .state_builder import BMParams, build_state_space
 from .em import em_step_ml
+from .stability import enforce_var_stability
 
 
 def _fit_var_ols(F: np.ndarray, p: int) -> tuple[list[np.ndarray], np.ndarray]:
+    """
+    Fit VAR(p) by OLS on factor matrix F (T, r).
+    Returns (Phi_list, Q_f) with Phi_list length p and Q_f (r,r).
+    """
     Tn, r = F.shape
     if p == 0:
         return [], np.eye(r, dtype=float) * 0.1
@@ -23,7 +27,7 @@ def _fit_var_ols(F: np.ndarray, p: int) -> tuple[list[np.ndarray], np.ndarray]:
     Z = np.concatenate(X_lags, axis=1)
     Y = F[p:, :]
 
-    B = np.linalg.lstsq(Z, Y, rcond=None)[0].T
+    B = np.linalg.lstsq(Z, Y, rcond=None)[0].T  # (r, r*p)
     Phi = [B[:, lag * r:(lag + 1) * r] for lag in range(p)]
     resid = Y - Z @ B.T
     Q_f = np.cov(resid.T, bias=True)
@@ -31,54 +35,57 @@ def _fit_var_ols(F: np.ndarray, p: int) -> tuple[list[np.ndarray], np.ndarray]:
 
 
 def fit_bm_dfm(
-    Y_monthly: np.ndarray,
-    y_quarterly: np.ndarray,
+    Y_monthly: np.ndarray,     # (T, nM) with NaNs
+    y_quarterly: np.ndarray,   # (T,) with NaNs except quarter-end months
     config: BMDfmConfig,
 ) -> BMDfmResult:
-    if config.p > 5:
-        raise ValueError("Toolbox parity requires p <= 5.")
     if int(config.n_quarterly) != 1:
-        raise ValueError("This implementation supports n_quarterly=1.")
+        raise ValueError("This implementation supports n_quarterly=1 (single quarterly target).")
+    if bool(config.enforce_quarterly_loading_constraint) and config.mm_weight_style != "toolbox":
+        raise ValueError('Quarterly loading constraint requires mm_weight_style="toolbox".')
 
     Tn, nM = Y_monthly.shape
     nQ = 1
     p = int(config.p)
     ppC = 5
 
-    Y = np.column_stack([Y_monthly, y_quarterly.reshape(-1, 1)]).astype(float)
+    # Assemble full observation matrix: [monthly indicators, quarterly target]
+    Y_raw = np.column_stack([Y_monthly, y_quarterly.reshape(-1, 1)]).astype(float)
 
-    # Scaling
-    Y, scaler = scale_panel(Y, mode=config.scaling_mode)
+    # Single scaling pass that feeds BOTH PCA init and EM/Kalman
+    Y, scaler = scale_panel(Y_raw, mode=config.scaling_mode)
 
     r_by_block = tuple(int(x) for x in config.r_by_block)
     r_total = int(sum(r_by_block))
     if r_total <= 0:
         raise ValueError("sum(r_by_block) must be positive.")
 
-    # PCA init on scaled monthly block
+    # PCA init on the scaled monthly panel
     F0, Lambda0 = pca_init_factors(Y[:, :nM], r_total, fill_mode=config.pca_fill)
 
-    # Factor VAR init per block
+    # Block-wise VAR init
     Phi_blocks: list[list[np.ndarray]] = []
     Q_f_blocks: list[np.ndarray] = []
 
     cursor = 0
     for rb in r_by_block:
+        rb = int(rb)
         Fb = F0[:, cursor:cursor + rb]
         Phi_b, Q_b = _fit_var_ols(Fb, p=p)
+
         if bool(config.force_var_stability) and p > 0:
             Phi_b = enforce_var_stability(
-                Phi_b,
-                ppC=int(ppC),
-                shrink=float(config.var_stability_shrink),
+                Phi_b, r=rb, p=p, ppC=ppC, shrink=float(config.var_stability_shrink)
             )
+
         Phi_blocks.append(Phi_b)
         Q_f_blocks.append(Q_b)
         cursor += rb
 
-    # Idiosyncratic init
+    # Idios init
     rho_m = np.full((nM,), float(config.rho_idio_init), dtype=float)
     sig2_m = np.full((nM,), 1.0, dtype=float)
+
     rho_q = np.full((nQ,), float(config.rho_idio_init), dtype=float)
     sig2_q = np.full((nQ,), 1.0, dtype=float)
 
@@ -90,7 +97,7 @@ def fit_bm_dfm(
     if np.any(obs_q):
         Lambda_q[0, :] = np.linalg.lstsq(F0[obs_q, :], Y[obs_q, nM], rcond=None)[0]
 
-    # Measurement variances init
+    # Measurement noise init
     if bool(config.idio_ar1):
         R_diag_m = np.full((nM,), float(config.monthly_meas_var_floor), dtype=float)
     else:
@@ -98,15 +105,15 @@ def fit_bm_dfm(
 
     R_diag_q = np.full((nQ,), float(config.quarterly_meas_var_floor), dtype=float)
 
-    # Quarterly idio scaling init via /sum(w^2)
+    # Toolbox quarterly scaling for initial quarterly idio stationary variance
     if np.any(obs_q):
         yq = Y[obs_q, nM]
         yq_hat = (F0[obs_q, :] @ Lambda_q[0, :].reshape(-1, 1)).reshape(-1)
         resid = yq - yq_hat
         var_q = float(np.nanvar(resid, ddof=0))
-        denom = mm_sum_sq(config.mm_weight_style)
+        denom = float(mm_sum_sq(config.mm_weight_style))
         sig2_q[0] = max(var_q / denom, float(config.min_var))
-        if config.fix_quarterly_R:
+        if bool(config.fix_quarterly_R):
             R_diag_q[0] = float(config.quarterly_meas_var_floor)
 
     params = BMParams(
@@ -122,26 +129,13 @@ def fit_bm_dfm(
         R_diag_q=R_diag_q,
     )
 
-    # Initial a0/P0 for EM
-    _, _, _, _, a0_cur, P0_cur, _ = build_state_space(
-        params=params,
-        nM=nM,
-        nQ=nQ,
-        r_by_block=r_by_block,
-        p=p,
-        ppC=ppC,
-        mm_style=config.mm_weight_style,
-        quarterly_meas_var_floor=float(config.quarterly_meas_var_floor),
-        monthly_meas_var_floor=float(config.monthly_meas_var_floor),
-        idio_ar1=bool(config.idio_ar1),
-        jitter=float(config.jitter),
-        P0_mode=str(config.P0_mode),
-    )
-
     loglik_trace: list[float] = []
     a_last = None
     P_last = None
     P_lag_last = None
+
+    a0_in = None
+    P0_in = None
 
     pbar = tqdm(range(int(config.max_iter)), desc="BM-DFM EM", unit="iter", leave=True)
     for it in pbar:
@@ -159,21 +153,22 @@ def fit_bm_dfm(
             idio_ar1=bool(config.idio_ar1),
             force_var_stability=bool(config.force_var_stability),
             var_stability_shrink=float(config.var_stability_shrink),
+            P0_mode=config.P0_mode,
+            a0_in=a0_in,
+            P0_in=P0_in,
+            update_initial_state=bool(config.update_initial_state_each_iter),
             min_var=float(config.min_var),
             jitter=float(config.jitter),
             enforce_q_loading_constraint=bool(config.enforce_quarterly_loading_constraint),
             fix_quarterly_R=bool(config.fix_quarterly_R),
             blocks=config.blocks,
-            a0_in=a0_cur,
-            P0_in=P0_cur,
-            P0_mode=str(config.P0_mode),
-            update_initial_state=bool(config.update_initial_state_each_iter),
         )
-        loglik_trace.append(float(ll))
 
         if bool(config.update_initial_state_each_iter):
-            a0_cur = a0_next
-            P0_cur = P0_next
+            a0_in = a0_next
+            P0_in = P0_next
+
+        loglik_trace.append(float(ll))
 
         if it == 0:
             pbar.set_postfix_str(f"loglik={ll:.2f}")
@@ -186,8 +181,8 @@ def fit_bm_dfm(
             pbar.set_postfix_str(f"loglik={ll:.2f}, converged")
             break
 
-    # Final state-space build using final params and final a0/P0
-    Tm, Qm, Cm, Rm, a0_fin, P0_fin, idx = build_state_space(
+    # Final state-space build (use last a0/P0 if updated)
+    Tm, Qm, Cm, Rm, a0, P0, idx = build_state_space(
         params=params,
         nM=nM,
         nQ=nQ,
@@ -196,12 +191,11 @@ def fit_bm_dfm(
         ppC=ppC,
         mm_style=config.mm_weight_style,
         quarterly_meas_var_floor=float(config.quarterly_meas_var_floor),
-        monthly_meas_var_floor=float(config.monthly_meas_var_floor),
         idio_ar1=bool(config.idio_ar1),
         jitter=float(config.jitter),
-        P0_mode=str(config.P0_mode),
-        a0_override=a0_cur,
-        P0_override=P0_cur,
+        P0_mode=config.P0_mode,
+        a0_override=a0_in,
+        P0_override=P0_in,
     )
 
     return BMDfmResult(
@@ -212,8 +206,8 @@ def fit_bm_dfm(
         Q=Qm,
         C=Cm,
         R=Rm,
-        a0=a0_fin,
-        P0=P0_fin,
+        a0=a0,
+        P0=P0,
         a_smooth=a_last,
         P_smooth=P_last,
         P_lag_smooth=P_lag_last,
