@@ -19,10 +19,11 @@ except Exception:
 @njit(cache=True)
 def accumulate_Sxx_Syx(Ezz, P_lag, a, f0_idx, lag_stack_idx):
     """
-    Computes:
-      S_yx = sum_t cross[f0, lag_stack]
-      S_xx = sum_t Ezz[t-1][lag_stack, lag_stack]
-    where cross[t] = P_lag[t] + a[t] a[t-1]'.
+    Accumulate sufficient statistics for VAR(p) update in companion form.
+
+    Returns:
+      S_xx = sum_t E[z_{t-1} z_{t-1}'] for lag stack indices
+      S_yx = sum_t E[f_t z_{t-1}'] for contemporaneous factor indices f0_idx
     """
     T = a.shape[0]
     rb = f0_idx.shape[0]
@@ -54,8 +55,10 @@ def accumulate_Sxx_Syx(Ezz, P_lag, a, f0_idx, lag_stack_idx):
 @njit(cache=True)
 def accumulate_Q_acc(Ezz, P_lag, a, f0_idx, lag_stack_idx, Phi_stack):
     """
-    Computes:
-      Q_acc = sum_t Eff - Phi*Efl' - Efl*Phi' + Phi*Ell*Phi'
+    Accumulate Q innovation covariance numerator for factor block update.
+
+    Q_acc = sum_t (Eff - Phi*Efl' - Efl*Phi' + Phi*Ell*Phi')
+    where Efl = E[f_t z_{t-1}'], Eff = E[f_t f_t'], Ell = E[z_{t-1} z_{t-1}'].
     """
     T = a.shape[0]
     rb = f0_idx.shape[0]
@@ -108,10 +111,11 @@ def accumulate_Q_acc(Ezz, P_lag, a, f0_idx, lag_stack_idx, Phi_stack):
 @njit(cache=True)
 def update_rho_sig2_from_diag(Ezz_diag, P_lag_diag, a_diag, min_var=1e-8):
     """
-    For one scalar state component z_t:
-      Ezz_diag[t] = E[z_t^2]
-      cross[t]    = E[z_t z_{t-1}] = P_lag_diag[t] + a_diag[t]*a_diag[t-1]
-    Returns (rho, sig2).
+    Update AR(1) parameters for a scalar state z_t using smoothed moments.
+
+    cross[t] = E[z_t z_{t-1}] = P_lag_diag[t] + a[t]*a[t-1]
+    rho = sum cross / sum E[z_{t-1}^2]
+    sig2 returned is the average E[z_t^2] (floor-applied).
     """
     T = a_diag.shape[0]
     num = 0.0

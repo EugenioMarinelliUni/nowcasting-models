@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Optional, Literal, Tuple, Callable
+from dataclasses import dataclass, fields, is_dataclass
+from typing import Optional, Literal, Tuple, Callable, Any, Dict
 
+import inspect
 import numpy as np
 import pandas as pd
 
@@ -114,9 +115,9 @@ def _kalman_update_subset(
     S = _sym(C_sub @ P_pr @ C_sub.T + R_sub)
 
     L = _chol_factor(S, jitter=1e-10)
-    B = C_sub @ P_pr  # (k, m)
-    S_inv_B = _chol_solve(L, B)  # (k, m)
-    K = S_inv_B.T  # (m, k)
+    B = C_sub @ P_pr
+    S_inv_B = _chol_solve(L, B)
+    K = S_inv_B.T
 
     I_m = np.eye(P_pr.shape[0])
     I_KC = I_m - K @ C_sub
@@ -155,6 +156,13 @@ class PseudoRTEvalConfig:
     score_by_covid: bool = True
 
 
+def _filter_kwargs_for_dataclass(cls: Any, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    if not is_dataclass(cls):
+        return kwargs
+    valid = {f.name for f in fields(cls)}
+    return {k: v for k, v in kwargs.items() if k in valid}
+
+
 def compute_scores(pred_df: pd.DataFrame) -> dict:
     out: dict = {}
     df = pred_df.copy()
@@ -186,46 +194,67 @@ def compute_scores(pred_df: pd.DataFrame) -> dict:
             "fda": fda(sub["pred"], sub["actual"]),
         }
 
-    out["by_horizon_moq"] = {}
-    for h in sorted(df["horizon"].unique()):
-        subh = df[df["horizon"] == h]
-        out["by_horizon_moq"][h] = {}
-        for k in (1, 2, 3):
-            sub = subh[subh["moq"] == k]
-            out["by_horizon_moq"][h][str(k)] = {
-                "n": int(sub["se"].notna().sum()),
-                "rmse": rmse_from_se(sub["se"]),
-                "fda": fda(sub["pred"], sub["actual"]),
-            }
+    if "moq" in df.columns:
+        out["by_horizon_moq"] = {}
+        for h in sorted(df["horizon"].unique()):
+            out["by_horizon_moq"][h] = {}
+            for moq in sorted(df["moq"].unique()):
+                sub = df[(df["horizon"] == h) & (df["moq"] == moq)]
+                out["by_horizon_moq"][h][int(moq)] = {
+                    "n": int(sub["se"].notna().sum()),
+                    "rmse": rmse_from_se(sub["se"]),
+                    "fda": fda(sub["pred"], sub["actual"]),
+                }
 
-    out["by_horizon_covid"] = {}
-    df["target_year"] = pd.to_datetime(df["target_date"]).dt.year
-    for h in sorted(df["horizon"].unique()):
-        subh = df[df["horizon"] == h]
-        out["by_horizon_covid"][h] = {}
-        splits = {
-            "all": subh,
-            "pre_2020": subh[subh["target_year"] < 2020],
-            "covid_2020": subh[subh["target_year"] == 2020],
-            "post_2020": subh[subh["target_year"] > 2020],
-            "no_covid": subh[subh["target_year"] != 2020],
-        }
-        for name, sub in splits.items():
-            out["by_horizon_covid"][h][name] = {
-                "n": int(sub["se"].notna().sum()),
-                "rmse": rmse_from_se(sub["se"]),
-                "fda": fda(sub["pred"], sub["actual"]),
-            }
+    if "covid" in df.columns:
+        out["by_horizon_covid"] = {}
+        for h in sorted(df["horizon"].unique()):
+            out["by_horizon_covid"][h] = {}
+            for flag in sorted(df["covid"].unique()):
+                sub = df[(df["horizon"] == h) & (df["covid"] == flag)]
+                out["by_horizon_covid"][h][str(flag)] = {
+                    "n": int(sub["se"].notna().sum()),
+                    "rmse": rmse_from_se(sub["se"]),
+                    "fda": fda(sub["pred"], sub["actual"]),
+                }
 
     return out
+
+
+def _fit_accepts_kwargs(fit_fn: Callable) -> Tuple[bool, bool]:
+    try:
+        sig = inspect.signature(fit_fn)
+        params = sig.parameters
+        return ("init_params" in params), ("em_cache" in params)
+    except Exception:
+        return False, False
+
+
+def _maybe_build_em_cache(model_config: Any, nM: int) -> Any:
+    try:
+        from dfm_pipeline.dfm_bm_ml.fast import build_em_cache
+    except Exception:
+        return None
+
+    r_by_block = tuple(int(x) for x in getattr(model_config, "r_by_block"))
+    return build_em_cache(
+        nM=int(nM),
+        nQ=1,
+        r_by_block=r_by_block,
+        blocks=getattr(model_config, "blocks", None),
+        enforce_q_loading_constraint=bool(getattr(model_config, "enforce_quarterly_loading_constraint", True)),
+    )
 
 
 def run_pseudo_rt_eval(
     X_full: pd.DataFrame,
     y_full: pd.Series,
     fit_fn: Callable,
-    model_config,
+    model_config: Any,
     eval_cfg: PseudoRTEvalConfig,
+    *,
+    warm_start: bool = False,
+    use_em_cache: bool = False,
 ) -> Tuple[pd.DataFrame, dict]:
     """
     Expanding-window recursive pseudo-OOS evaluation.
@@ -264,6 +293,11 @@ def run_pseudo_rt_eval(
         raise ValueError(f"Unknown delay_style: {eval_cfg.delay_style!r}")
 
     nM = int(X_full.shape[1])
+
+    accepts_init, accepts_cache = _fit_accepts_kwargs(fit_fn)
+    em_cache = _maybe_build_em_cache(model_config, nM=nM) if (use_em_cache and accepts_cache) else None
+
+    last_params = None
     rows: list[dict] = []
 
     for t in eval_dates:
@@ -278,7 +312,16 @@ def run_pseudo_rt_eval(
         Y_monthly = Xrt.to_numpy(dtype=float)
         y_quarterly = yrt.to_numpy(dtype=float)
 
-        res = fit_fn(Y_monthly=Y_monthly, y_quarterly=y_quarterly, config=model_config)
+        call_kwargs: Dict[str, Any] = dict(Y_monthly=Y_monthly, y_quarterly=y_quarterly, config=model_config)
+        if accepts_cache and em_cache is not None:
+            call_kwargs["em_cache"] = em_cache
+        if accepts_init:
+            call_kwargs["init_params"] = (last_params if warm_start else None)
+
+        res = fit_fn(**call_kwargs)
+
+        if warm_start and hasattr(res, "params_final") and getattr(res, "params_final") is not None:
+            last_params = getattr(res, "params_final")
 
         Y_stack = np.column_stack([Y_monthly, y_quarterly.reshape(-1, 1)]).astype(float)
         ss = StateSpaceParams(T=res.T, Q=res.Q, C=res.C, R=res.R, a0=res.a0, P0=res.P0)

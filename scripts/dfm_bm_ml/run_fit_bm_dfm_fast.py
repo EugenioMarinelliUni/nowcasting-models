@@ -1,96 +1,170 @@
 from __future__ import annotations
 
 import argparse
+import json
+from dataclasses import fields, is_dataclass
 from pathlib import Path
+from typing import Any, Dict, Tuple, List
 
 import numpy as np
 import pandas as pd
 
-from src.dfm_pipeline.dfm_bm_ml.fast.fit_fast import fit_bm_dfm_fast
-from src.dfm_pipeline.dfm_bm_ml.spec import BMDfmConfig
+from dfm_pipeline.dfm_bm_ml.spec import BMDfmConfig
+from dfm_pipeline.dfm_bm_ml.fast import fit_bm_dfm_fast
 
 
-def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser()
-    p.add_argument("--monthly_csv", type=str, required=True)
-    p.add_argument("--quarterly_csv", type=str, required=True)
-    p.add_argument("--out_npz", type=str, required=True)
+def _filter_kwargs_for_dataclass(cls: Any, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    if not is_dataclass(cls):
+        return kwargs
+    valid = {f.name for f in fields(cls)}
+    return {k: v for k, v in kwargs.items() if k in valid}
 
-    p.add_argument("--r_by_block", type=int, nargs="+", required=True)
-    p.add_argument("--p", type=int, required=True)
 
-    p.add_argument("--standardize", action="store_true", default=False)
-    p.add_argument("--no-standardize", dest="standardize", action="store_false")
+def _read_panel_csv(path: Path, date_col: str = "sasdate") -> pd.DataFrame:
+    df = pd.read_csv(path)
+    if date_col not in df.columns:
+        raise ValueError(f"Panel CSV missing date column {date_col!r}. Columns: {list(df.columns)[:10]} ...")
+    df[date_col] = pd.to_datetime(df[date_col])
+    df = df.sort_values(date_col).set_index(date_col)
+    return df
 
-    p.add_argument("--pca_fill", type=str, default="mean", choices=["mean", "ffill"])
 
-    p.add_argument("--rho_idio_init", type=float, default=0.10)
-    p.add_argument("--max_iter", type=int, default=200)
-    p.add_argument("--tol", type=float, default=1e-6)
+def _read_target_csv(path: Path, target_col: str, date_col: str = "sasdate") -> pd.Series:
+    df = pd.read_csv(path)
+    if date_col not in df.columns:
+        raise ValueError(f"Target CSV missing date column {date_col!r}. Columns: {list(df.columns)[:10]} ...")
+    if target_col not in df.columns:
+        raise ValueError(f"Target CSV missing target column {target_col!r}. Columns: {list(df.columns)[:10]} ...")
+    df[date_col] = pd.to_datetime(df[date_col])
+    df = df.sort_values(date_col).set_index(date_col)
+    return df[target_col].astype(float)
 
-    p.add_argument("--force_var_stability", action="store_true", default=True)
-    p.add_argument("--no-force_var_stability", dest="force_var_stability", action="store_false")
-    p.add_argument("--var_stability_shrink", type=float, default=0.98)
 
-    p.add_argument("--monthly_meas_var_floor", type=float, default=1e-4)
-    p.add_argument("--quarterly_meas_var_floor", type=float, default=1e-4)
-
-    return p.parse_args()
+def _align_to_panel_index(
+    X: pd.DataFrame,
+    y: pd.Series,
+) -> Tuple[np.ndarray, np.ndarray, List[str], pd.DatetimeIndex]:
+    idx = X.index
+    y_aligned = y.reindex(idx)
+    return X.to_numpy(dtype=float), y_aligned.to_numpy(dtype=float), list(X.columns), idx
 
 
 def main() -> None:
-    args = _parse_args()
+    ap = argparse.ArgumentParser()
 
-    X = pd.read_csv(args.monthly_csv, index_col=0, parse_dates=True)
-    yq = pd.read_csv(args.quarterly_csv, index_col=0, parse_dates=True).iloc[:, 0]
+    ap.add_argument("--panel-csv", required=True, type=str)
+    ap.add_argument("--target-csv", required=True, type=str)
+    ap.add_argument("--target-col", required=True, type=str)
+    ap.add_argument("--outdir", required=True, type=str)
 
-    Y_monthly = X.to_numpy(dtype=float)
-    y_quarterly = yq.reindex(X.index).to_numpy(dtype=float)
+    ap.add_argument("--date-col", default="sasdate", type=str)
 
-    scaling_mode = "internal_per_run" if bool(args.standardize) else "external_frozen"
+    ap.add_argument("--r", required=True, type=int)
+    ap.add_argument("--p", required=True, type=int)
 
-    config = BMDfmConfig(
-        r_by_block=tuple(int(x) for x in args.r_by_block),
+    ap.add_argument("--mm-style", default="toolbox", choices=["toolbox", "scaled"])
+    ap.add_argument("--pca-fill", default="mean", choices=["mean", "ffill"])
+
+    ap.add_argument("--max-iter", default=200, type=int)
+    ap.add_argument("--tol", default=1e-6, type=float)
+
+    ap.add_argument("--rho-idio-init", default=0.10, type=float)
+    ap.add_argument("--min-var", default=1e-8, type=float)
+    ap.add_argument("--jitter", default=1e-12, type=float)
+
+    ap.add_argument("--monthly-meas-var-floor", default=1e-4, type=float)
+    ap.add_argument("--quarterly-meas-var-floor", default=1e-4, type=float)
+
+    ap.add_argument("--scaling-mode", default="external_frozen", choices=["external_frozen", "internal_per_run"])
+
+    ap.add_argument("--idio-ar1", dest="idio_ar1", action="store_true", default=True)
+    ap.add_argument("--no-idio-ar1", dest="idio_ar1", action="store_false")
+
+    ap.add_argument("--enforce-quarterly-loading-constraint", action="store_true", default=True)
+    ap.add_argument(
+        "--no-enforce-quarterly-loading-constraint",
+        dest="enforce_quarterly_loading_constraint",
+        action="store_false",
+    )
+
+    ap.add_argument("--fix-quarterly-R", action="store_true", default=True)
+    ap.add_argument("--no-fix-quarterly-R", dest="fix_quarterly_R", action="store_false")
+
+    ap.add_argument("--force-var-stability", dest="force_var_stability", action="store_true", default=True)
+    ap.add_argument("--no-force-var-stability", dest="force_var_stability", action="store_false")
+    ap.add_argument("--var-stability-shrink", default=0.98, type=float)
+
+    args = ap.parse_args()
+
+    outdir = Path(args.outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    X_df = _read_panel_csv(Path(args.panel_csv), date_col=args.date_col)
+    y_s = _read_target_csv(Path(args.target_csv), target_col=args.target_col, date_col=args.date_col)
+
+    X, y, x_cols, idx = _align_to_panel_index(X_df, y_s)
+
+    model_kwargs: Dict[str, Any] = dict(
+        r_by_block=(int(args.r),),
         p=int(args.p),
-        idio_ar1=True,
-        rho_idio_init=float(args.rho_idio_init),
+        blocks=None,
         n_quarterly=1,
-        mm_weight_style="toolbox",
-        quarterly_meas_var_floor=float(args.quarterly_meas_var_floor),
-        monthly_meas_var_floor=float(args.monthly_meas_var_floor),
-        enforce_quarterly_loading_constraint=True,
-        fix_quarterly_R=True,
+        mm_weight_style=str(args.mm_style),
+        pca_fill=str(args.pca_fill),
         max_iter=int(args.max_iter),
         tol=float(args.tol),
-        pca_fill=str(args.pca_fill),
-        scaling_mode=scaling_mode,
+        rho_idio_init=float(args.rho_idio_init),
+        min_var=float(args.min_var),
+        jitter=float(args.jitter),
+        monthly_meas_var_floor=float(args.monthly_meas_var_floor),
+        quarterly_meas_var_floor=float(args.quarterly_meas_var_floor),
+        scaling_mode=str(args.scaling_mode),
+        idio_ar1=bool(args.idio_ar1),
+        enforce_quarterly_loading_constraint=bool(args.enforce_quarterly_loading_constraint),
+        fix_quarterly_R=bool(args.fix_quarterly_R),
         force_var_stability=bool(args.force_var_stability),
         var_stability_shrink=float(args.var_stability_shrink),
     )
+    model_kwargs = _filter_kwargs_for_dataclass(BMDfmConfig, model_kwargs)
+    cfg = BMDfmConfig(**model_kwargs)
 
-    res = fit_bm_dfm_fast(Y_monthly=Y_monthly, y_quarterly=y_quarterly, config=config)
+    res = fit_bm_dfm_fast(Y_monthly=X, y_quarterly=y, config=cfg)
 
-    out_path = Path(args.out_npz)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    npz_path = outdir / "bm_dfm_fit_fast.npz"
+    json_path = outdir / "bm_dfm_fit_fast.json"
 
     np.savez_compressed(
-        out_path,
-        loglik=np.array(res.loglik_trace, dtype=float),
-        a_smooth=res.a_smooth,
-        P_smooth=res.P_smooth,
-        P_lag_smooth=res.P_lag_smooth,
+        npz_path,
         T=res.T,
         Q=res.Q,
         C=res.C,
         R=res.R,
         a0=res.a0,
         P0=res.P0,
-        scaler_mu=res.scaler.mu,
-        scaler_sd=res.scaler.sd,
-        scaler_mode=np.array([res.scaler.mode], dtype=object),
+        a_smooth=res.a_smooth,
+        P_smooth=res.P_smooth,
+        P_lag_smooth=res.P_lag_smooth,
         f_t_idx=res.f_t_idx,
         f_stack_idx=res.f_stack_idx,
+        date_index=idx.astype("datetime64[ns]").values,
+        x_columns=np.array(x_cols, dtype=object),
     )
+
+    meta = {
+        "panel_csv": args.panel_csv,
+        "target_csv": args.target_csv,
+        "date_col": args.date_col,
+        "target_col": args.target_col,
+        "x_columns": x_cols,
+        "n_obs": int(X.shape[0]),
+        "n_monthly": int(X.shape[1]),
+        "config": model_kwargs,
+        "loglik_trace": [float(v) for v in res.loglik_trace],
+    }
+    json_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+
+    print(str(npz_path))
+    print(str(json_path))
 
 
 if __name__ == "__main__":

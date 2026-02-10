@@ -1,14 +1,9 @@
 from __future__ import annotations
 
-"""Fast drop-in helpers for :mod:`dfm_pipeline.dfm_bm_ml.constraints`.
+"""Fast helpers for constrained least squares in quarterly loading updates.
 
-The goal is to preserve the exact model logic while reducing runtime.
-
-Key change:
-  - Avoid explicit ``inv(denom)`` in constrained least squares.
-    We use linear solves instead (same solution, typically faster and more stable).
-
-The original module is kept unchanged for side-by-side comparison.
+Public contract: constrained_ls_fast(denom, nom, R_con, q_con) -> C_con
+No scaling or model logic belongs here.
 """
 
 from typing import Tuple
@@ -17,7 +12,7 @@ import numpy as np
 
 
 def toolbox_R_mat() -> Tuple[np.ndarray, np.ndarray]:
-    """Same as :func:`dfm_pipeline.dfm_bm_ml.constraints.toolbox_R_mat`."""
+    """Toolbox proportionality constraints for 5-lag quarterly loadings."""
     R = np.array(
         [
             [2.0, -1.0, 0.0, 0.0, 0.0],
@@ -32,7 +27,7 @@ def toolbox_R_mat() -> Tuple[np.ndarray, np.ndarray]:
 
 
 def kron_quarterly_constraints(R_mat: np.ndarray, r_total: int) -> np.ndarray:
-    """Same as :func:`dfm_pipeline.dfm_bm_ml.constraints.kron_quarterly_constraints`."""
+    """Kronecker expansion of R_mat over factor dimension r_total."""
     return np.kron(R_mat, np.eye(r_total, dtype=float))
 
 
@@ -42,23 +37,28 @@ def constrained_ls_fast(
     R_con: np.ndarray,
     q_con: np.ndarray,
 ) -> np.ndarray:
-    """Constrained LS without explicit inverses.
-
-    Original projection step:
-      C = denom^{-1} nom
-      C_con = C - denom^{-1} R' (R denom^{-1} R')^{-1} (R C - q)
-
-    We compute ``denom^{-1} R'`` via a solve.
     """
-    # Unconstrained solution
+    Constrained LS without explicit inverses.
+
+    Unconstrained:
+      C = denom^{-1} nom
+
+    Projection:
+      C_con = C - denom^{-1} R' (R denom^{-1} R')^{-1} (R C - q)
+    """
+    denom = np.asarray(denom, dtype=float)
+    nom = np.asarray(nom, dtype=float)
+
+    if denom.ndim != 2 or denom.shape[0] != denom.shape[1]:
+        raise ValueError("denom must be square 2D.")
+    if nom.ndim == 1:
+        nom = nom.reshape(-1, 1)
+
     C = np.linalg.solve(denom, nom)
 
-    # X = denom^{-1} R'  (shape: (p, k) where p=len(C), k=#constraints)
     X = np.linalg.solve(denom, R_con.T)
-
-    # middle = R denom^{-1} R' = R X
     middle = R_con @ X
-    lam = np.linalg.solve(middle, (R_con @ C - q_con))
+    lam = np.linalg.solve(middle, (R_con @ C - q_con.reshape(-1, 1)))
+    C_con = C - X @ lam
 
-    # C_con = C - (denom^{-1} R') lam
-    return C - X @ lam
+    return C_con.reshape(-1)
