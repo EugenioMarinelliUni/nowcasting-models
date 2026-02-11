@@ -86,3 +86,7 @@ data/metadata/dfm_*forecasts/
 data/metadata/dfm_grid/
 data/metadata/panels/
 .venv*/
+
+# local notes/helpers
+/docs/
+/scripts/bash/
