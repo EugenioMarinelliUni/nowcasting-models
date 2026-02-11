@@ -10,14 +10,16 @@ from typing import Dict, Optional, Tuple
 
 import pandas as pd
 
-from src.dfm_pipeline.covid.covid_make_delete_weights import apply_delete_nan
-from src.dfm_pipeline.covid.methods import variant_iqd_outliers_to_nan
-from src.dfm_pipeline.covid.spec import CovidSpec, parse_window
-
-
-# --------------------------------------------------------------------
-# Helpers
-# --------------------------------------------------------------------
+try:
+    from dfm_pipeline.covid.covid_make_delete_weights import apply_delete_nan
+    from dfm_pipeline.covid.methods import variant_iqd_outliers_to_nan
+    from dfm_pipeline.covid.spec import CovidSpec, parse_window
+except ImportError:
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+    from dfm_pipeline.covid.covid_make_delete_weights import apply_delete_nan
+    from dfm_pipeline.covid.methods import variant_iqd_outliers_to_nan
+    from dfm_pipeline.covid.spec import CovidSpec, parse_window
 
 
 def read_panel(panel_csv: str) -> pd.DataFrame:
@@ -133,13 +135,6 @@ def apply_covid_policy_to_oos(
     lm_outliers_min_obs: int,
     lm_outliers_fit_window: Tuple[str, str],
 ) -> pd.DataFrame:
-    """
-    Apply covid-policy to standardized OOS predictors only.
-
-    none        -> no change
-    covid_delete-> set X to NaN in [covid_start, covid_end]
-    lm_outliers -> IQD outliers -> NaN, thresholds fit on fit_window, applied on covid window
-    """
     if X_oos.empty:
         return X_oos
 
@@ -169,11 +164,6 @@ def apply_covid_policy_to_oos(
         return res.X
 
     raise ValueError(f"Unknown covid_policy={policy!r}")
-
-
-# --------------------------------------------------------------------
-# Main
-# --------------------------------------------------------------------
 
 
 def main() -> None:
