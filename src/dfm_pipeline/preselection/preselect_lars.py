@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Tuple
 import numpy as np
 import pandas as pd
 
-from src.dfm_pipeline.preselection.baseline_screening.selectors import lars_select
+from dfm_pipeline.preselection.baseline_screening.selectors import lars_select
 
 
 def _abs_corr_all(X: pd.DataFrame, y: pd.Series) -> pd.Series:
@@ -31,31 +31,6 @@ def run_lars_tscv_preselection(
 ) -> Tuple[pd.DataFrame, List[str], Dict[str, Any]]:
     """
     High-level LARS+TSCV wrapper used by scripts/preselection/run_preselection.py.
-
-    Parameters
-    ----------
-    X_rank : DataFrame
-        Aggregated (typically quarterly) predictor matrix, index aligned with y_rank.
-    y_rank : Series
-        Target series on the same index.
-    params : dict
-        Hyperparameters for LARS, expected keys:
-          - min_features : int
-          - max_features : int
-          - dedup_tau    : float
-          - cv           : int   (number of folds, default 10)
-          - lars_one_se  : bool  (if True, 1-SE rule, default True/False depending on your choice)
-
-    Returns
-    -------
-    rank_df : DataFrame
-        Index = variable names, columns:
-          - abs_corr  : |corr(X_j, y)| (diagnostic ranking)
-          - selected  : bool, whether LARS+TSCV picked the variable
-    selected_vars : list[str]
-        List of selected variable names.
-    meta : dict
-        Metadata dictionary (hyperparameters, counts, etc.).
     """
     min_features = int(params.get("min_features", 10))
     max_features = int(params.get("max_features", 80))

@@ -6,10 +6,12 @@ import json
 from pathlib import Path
 from typing import Dict
 
-from src.dfm_pipeline.preselection.reconcile_methods import (
-    SelectionConfig,
-    reconcile_selections,
-)
+try:
+    from dfm_pipeline.preselection.reconcile_methods import SelectionConfig, reconcile_selections
+except ImportError:
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+    from dfm_pipeline.preselection.reconcile_methods import SelectionConfig, reconcile_selections
 
 
 def _parse_json_dict(s: str | None, default: Dict[str, float]) -> Dict[str, float]:
@@ -46,14 +48,10 @@ def main() -> None:
         ),
     )
 
-    # Method A hyperparameters
     ap.add_argument(
         "--per-method-threshold-json",
         default='{"sis": 0.5, "tstat": 0.5, "lars": 0.3}',
-        help=(
-            "JSON mapping {method -> threshold} for vote rule. "
-            "Example: '{\"sis\":0.5,\"tstat\":0.5,\"lars\":0.3}'"
-        ),
+        help="JSON mapping {method -> threshold} for vote rule.",
     )
     ap.add_argument(
         "--min-methods-selected",
@@ -62,14 +60,10 @@ def main() -> None:
         help="Minimum number of methods that must select a variable in Method A.",
     )
 
-    # Method B hyperparameters
     ap.add_argument(
         "--stability-weights-json",
         default='{"sis": 0.4, "tstat": 0.4, "lars": 0.2}',
-        help=(
-            "JSON mapping {method -> weight} for stability score. "
-            "Example: '{\"sis\":0.4,\"tstat\":0.4,\"lars\":0.2}'"
-        ),
+        help="JSON mapping {method -> weight} for stability score.",
     )
     ap.add_argument(
         "--top-k-B",
@@ -78,14 +72,10 @@ def main() -> None:
         help="Number of variables to keep in Method B panel (score_B). <=0 means keep all.",
     )
 
-    # Method C hyperparameters
     ap.add_argument(
         "--rank-weights-json",
         default='{"sis": 1.0, "tstat": 1.0, "lars": 1.0}',
-        help=(
-            "JSON mapping {method -> weight} for rank aggregation. "
-            "Example: '{\"sis\":1.0,\"tstat\":1.0,\"lars\":1.0}'"
-        ),
+        help="JSON mapping {method -> weight} for rank aggregation.",
     )
     ap.add_argument(
         "--top-k-C",
@@ -104,7 +94,6 @@ def main() -> None:
     comparison_csv = Path(args.comparison_csv)
     out_prefix = Path(args.out_prefix)
 
-    # Config: columns in your selection_comparison_*_frac.csv
     cfg = SelectionConfig(
         frac_cols={
             "sis": "sis_frac",
@@ -114,7 +103,6 @@ def main() -> None:
         group_col="group",
     )
 
-    # Parse JSON hyperparameters
     per_method_threshold = _parse_json_dict(
         args.per_method_threshold_json,
         default={"sis": 0.5, "tstat": 0.5, "lars": 0.3},

@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Tuple
 import numpy as np
 import pandas as pd
 
-from src.dfm_pipeline.preselection.baseline_screening.selectors import tstat_select
+from dfm_pipeline.preselection.baseline_screening.selectors import tstat_select
 
 
 def _abs_corr_all(X: pd.DataFrame, y: pd.Series) -> pd.Series:

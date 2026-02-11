@@ -10,11 +10,20 @@ from typing import Any, Dict, List, Tuple, overload, Union, cast
 
 import pandas as pd
 
-from src.dfm_pipeline.preselection.preselect_sis import run_sis_preselection
-from src.dfm_pipeline.preselection.preselect_tstat import run_tstat_preselection
-from src.dfm_pipeline.preselection.preselect_lars import run_lars_tscv_preselection
-from src.dfm_pipeline.preselection.preselect_tstat_lm import run_tstat_lm_preselection
-from src.dfm_pipeline.preselection.preselect_lars_lm import run_lars_lm_preselection
+try:
+    from dfm_pipeline.preselection.preselect_sis import run_sis_preselection
+    from dfm_pipeline.preselection.preselect_tstat import run_tstat_preselection
+    from dfm_pipeline.preselection.preselect_lars import run_lars_tscv_preselection
+    from dfm_pipeline.preselection.preselect_tstat_lm import run_tstat_lm_preselection
+    from dfm_pipeline.preselection.preselect_lars_lm import run_lars_lm_preselection
+except ImportError:
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+    from dfm_pipeline.preselection.preselect_sis import run_sis_preselection
+    from dfm_pipeline.preselection.preselect_tstat import run_tstat_preselection
+    from dfm_pipeline.preselection.preselect_lars import run_lars_tscv_preselection
+    from dfm_pipeline.preselection.preselect_tstat_lm import run_tstat_lm_preselection
+    from dfm_pipeline.preselection.preselect_lars_lm import run_lars_lm_preselection
 
 
 # ---------------------------------------------------------------------
@@ -45,7 +54,6 @@ def ensure_dir(p: Path) -> None:
 def fmt_span_full(start: str, end: str) -> str:
     s = pd.to_datetime(start)
     e = pd.to_datetime(end)
-    # YYYY_MM_DD_YYYY_MM_DD
     return (
         f"{s.year:04d}_{s.month:02d}_{s.day:02d}_"
         f"{e.year:04d}_{e.month:02d}_{e.day:02d}"
@@ -61,7 +69,6 @@ def clip_window(df: pd.Series, start: str, end: str) -> pd.Series: ...
 
 
 def clip_window(df: Union[pd.DataFrame, pd.Series], start: str, end: str):
-    """Restrict DataFrame/Series to [start, end] on the index."""
     start_ts = pd.to_datetime(start)
     end_ts = pd.to_datetime(end)
     return df.loc[(df.index >= start_ts) & (df.index <= end_ts)]
@@ -90,13 +97,6 @@ def load_target(target_csv: str) -> pd.Series:
 
 
 def load_group_map(path: str) -> Dict[str, str]:
-    """Load var -> group from JSON.
-
-    Accepts either:
-      { "RPI": "Output & Income", ... }
-    or:
-      { "groups": { "RPI": "Output & Income", ... } }
-    """
     obj = json.loads(Path(path).read_text(encoding="utf-8"))
     if isinstance(obj, dict):
         if "groups" in obj and isinstance(obj["groups"], dict):
@@ -111,7 +111,6 @@ def load_group_map(path: str) -> Dict[str, str]:
 
 
 def aggregate_series_quarterly(series: pd.Series, rule: str) -> pd.Series:
-    """Aggregate a monthly series to quarterly according to `rule`."""
     if series.empty:
         return series.copy()
 
@@ -135,7 +134,6 @@ def aggregate_panel_quarterly(
     agg_map: Dict[str, Any],
     agg_default_rule: str | None,
 ) -> pd.DataFrame:
-    """Apply JSON-driven quarterly aggregation to each column in a monthly panel."""
     if panel_train.empty:
         return panel_train.copy()
 
@@ -167,11 +165,9 @@ def aggregate_panel_quarterly(
 
 
 def _infer_month_anchor(index: pd.DatetimeIndex) -> str:
-    """Infer whether the panel index is month-start or month-end."""
     if index.empty:
         return "start"
     days = index.day
-    # In this project, monthly indices are usually day==1.
     if float((days == 1).mean()) >= 0.8:
         return "start"
     return "end"
@@ -187,7 +183,6 @@ def _to_month_anchor(ts: pd.Timestamp, month_anchor: str) -> pd.Timestamp:
 
 
 def _mm_weighted_sum(s: pd.Series) -> pd.Series:
-    """Mariano–Murasawa 5-month weighted sum: 1,2,3,2,1."""
     return (
         1.0 * s
         + 2.0 * s.shift(1)
@@ -198,15 +193,6 @@ def _mm_weighted_sum(s: pd.Series) -> pd.Series:
 
 
 def aggregate_panel_mm_quarterly(panel_train: pd.DataFrame, target_index: pd.DatetimeIndex) -> pd.DataFrame:
-    """Apply Mariano–Murasawa aggregation then sample on quarterly target dates.
-
-    Matches Linzenich–Meunier toolbox step:
-      (i) standardize monthly series
-      (ii) apply 5-month weights 1,2,3,2,1
-      (iii) keep values on quarterly dates
-
-    Output index equals target_index.
-    """
     if panel_train.empty:
         return pd.DataFrame(index=target_index)
     if target_index.empty:
@@ -214,8 +200,6 @@ def aggregate_panel_mm_quarterly(panel_train: pd.DataFrame, target_index: pd.Dat
 
     month_anchor = _infer_month_anchor(pd.DatetimeIndex(panel_train.index))
 
-    # Map each quarterly target timestamp to the corresponding monthly timestamp
-    # present in the panel index (month-start vs month-end).
     monthly_lookup = pd.DatetimeIndex([
         _to_month_anchor(pd.Timestamp(d), month_anchor) for d in target_index
     ])
@@ -228,13 +212,11 @@ def aggregate_panel_mm_quarterly(panel_train: pd.DataFrame, target_index: pd.Dat
         s.index = panel_idx
         mm = _mm_weighted_sum(s)
 
-        # Sample mm at the mapped monthly timestamps.
         sampled = pd.Series(index=target_index, dtype=float, name=col)
         common = monthly_lookup.intersection(pd.DatetimeIndex(mm.index))
         if not common.empty:
-            # monthly timestamp -> quarterly timestamp (1-to-1)
             q_map = {m: q for q, m in zip(target_index, monthly_lookup)}
-            sampled.loc[[q_map[m] for m in common]] = mm.loc[common].values
+            sampled.loc[[q_map[m] for m in common]] = mm.loc[common].to_numpy()
         out[col] = sampled
 
     return pd.DataFrame(out, index=target_index).sort_index()
@@ -247,19 +229,6 @@ def apply_aggregation_for_ranking(
     agg_default_rule: str | None,
     agg_mode: str,
 ) -> Tuple[pd.DataFrame, pd.Series]:
-    """Prepare (X_rank, y_rank) for preselection.
-
-    agg_mode == "none":
-      Align monthly panel and (monthly) y on intersection of dates.
-
-    agg_mode == "quarterly":
-      Aggregate monthly panel to quarterly using agg_map/agg_default_rule.
-      Align quarterly panel and quarterly y on intersection of dates.
-
-    agg_mode == "mm":
-      Apply Mariano–Murasawa 5-month weighted sum to each monthly series and
-      sample on the quarterly target index.
-    """
     if agg_mode == "none":
         panel_align, y_align = panel_train.align(y_train, join="inner", axis=0)
         return panel_align, y_align
@@ -271,31 +240,26 @@ def apply_aggregation_for_ranking(
         panel_q = aggregate_panel_quarterly(panel_train, agg_map, agg_default_rule)
         idx_common = panel_q.index.intersection(y_q.index)
         if idx_common.empty:
-            raise ValueError(
-                "No overlapping quarterly dates between panel and target after aggregation."
-            )
+            raise ValueError("No overlapping quarterly dates between panel and target after aggregation.")
         X_rank = panel_q.loc[idx_common].sort_index()
         y_rank = y_q.loc[idx_common].sort_index()
         return X_rank, y_rank
 
     if agg_mode == "mm":
-        # Sampled exactly on y index; then drop rows with any NaN introduced by lags.
         panel_mm = aggregate_panel_mm_quarterly(panel_train, target_index=y_q.index)
         X_rank, y_rank = panel_mm.align(y_q, join="inner", axis=0)
         mask = (~y_rank.isna()) & (~X_rank.isna().any(axis=1))
         X_rank = X_rank.loc[mask].sort_index()
         y_rank = y_rank.loc[mask].sort_index()
         if X_rank.empty:
-            raise ValueError(
-                "No usable observations after MM aggregation and NA removal."
-            )
+            raise ValueError("No usable observations after MM aggregation and NA removal.")
         return X_rank, y_rank
 
     raise ValueError(f"Unsupported agg_mode={agg_mode!r}. Use 'none', 'quarterly', or 'mm'.")
 
 
 # ---------------------------------------------------------------------
-# Method dispatch (SIS / tstat / LARS)
+# Method dispatch
 # ---------------------------------------------------------------------
 
 
@@ -368,20 +332,14 @@ def write_artifacts(
     rank_path = outdir / "rank.csv"
     info_path = outdir / "info.json"
 
-    sel_path.write_text(
-        json.dumps(selected_vars, indent=2, sort_keys=True), encoding="utf-8"
-    )
+    sel_path.write_text(json.dumps(selected_vars, indent=2, sort_keys=True), encoding="utf-8")
 
     rank_to_save = rank_df.copy()
     if group_map is not None and not rank_to_save.empty:
-        rank_to_save["group"] = [
-            group_map.get(str(var), None) for var in rank_to_save.index
-        ]
+        rank_to_save["group"] = [group_map.get(str(var), None) for var in rank_to_save.index]
     rank_to_save.to_csv(rank_path, index=True)
 
-    info_path.write_text(
-        json.dumps(asdict(info), indent=2, sort_keys=True), encoding="utf-8"
-    )
+    info_path.write_text(json.dumps(asdict(info), indent=2, sort_keys=True), encoding="utf-8")
 
     print(f"[preselection] wrote: {sel_path}")
     print(f"[preselection] rank:  {rank_path}")
@@ -390,10 +348,7 @@ def write_artifacts(
     if group_map is not None:
         sel_groups = {var: group_map.get(str(var), None) for var in selected_vars}
         sel_with_group_path = outdir / "selected_vars_with_group.json"
-        sel_with_group_path.write_text(
-            json.dumps(sel_groups, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
+        sel_with_group_path.write_text(json.dumps(sel_groups, indent=2, sort_keys=True), encoding="utf-8")
         print(f"[preselection] groups: {sel_with_group_path}")
 
 
@@ -403,9 +358,7 @@ def write_artifacts(
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(
-        description="Run variable preselection (SIS / tstat / LARS) on training panel."
-    )
+    ap = argparse.ArgumentParser(description="Run variable preselection (SIS / tstat / LARS) on training panel.")
 
     ap.add_argument("--panel-csv", required=True, help="Path to TRAIN panel CSV.")
     ap.add_argument("--target-csv", required=True, help="Path to TRAIN target CSV.")
@@ -424,9 +377,11 @@ def main() -> None:
         "--agg-mode",
         choices=["none", "quarterly", "mm"],
         default="quarterly",
-        help="Aggregation mode for X before preselection. "
-             "'quarterly' uses JSON within-quarter rules. "
-             "'mm' applies Mariano–Murasawa 5-month filter then samples on y dates.",
+        help=(
+            "Aggregation mode for X before preselection. "
+            "'quarterly' uses JSON within-quarter rules. "
+            "'mm' applies Mariano–Murasawa 5-month filter then samples on y dates."
+        ),
     )
     ap.add_argument(
         "--agg-rule-path",
@@ -436,10 +391,7 @@ def main() -> None:
     ap.add_argument(
         "--agg-default-rule",
         default=None,
-        help=(
-            "Optional fallback aggregation rule (e.g. sum3m) for series not in agg-rule-path. "
-            "Used only for agg-mode=quarterly."
-        ),
+        help="Optional fallback aggregation rule (e.g. sum3m). Used only for agg-mode=quarterly.",
     )
 
     ap.add_argument(
@@ -479,9 +431,7 @@ def main() -> None:
 
     if args.agg_mode == "quarterly":
         if not args.agg_rule_path and agg_default_rule is None:
-            raise ValueError(
-                "agg-mode=quarterly requires either --agg-rule-path or --agg-default-rule."
-            )
+            raise ValueError("agg-mode=quarterly requires either --agg-rule-path or --agg-default-rule.")
 
         if args.agg_rule_path:
             cfg = json.loads(Path(args.agg_rule_path).read_text(encoding="utf-8"))
@@ -490,7 +440,7 @@ def main() -> None:
             else:
                 agg_map = cfg
         else:
-            agg_map = {}  # rely on agg_default_rule
+            agg_map = {}
 
     X_rank, y_rank = apply_aggregation_for_ranking(
         panel_train=panel_train,
