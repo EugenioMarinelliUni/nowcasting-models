@@ -40,10 +40,6 @@ class TrainingSetRef:
 
 
 def _infer_train_window_from_tag(tag: str) -> Tuple[str, str] | None:
-    """
-    If tag looks like trainYYYY_YYYY, return canonical monthly dates
-    (YYYY-02-01 .. YYYY-12-01) to match your training panels.
-    """
     m = _TRAIN_TAG_RE.match(tag)
     if not m:
         return None
@@ -52,34 +48,22 @@ def _infer_train_window_from_tag(tag: str) -> Tuple[str, str] | None:
 
 
 def _discover_training_sets(root: Path = Path("dataset")) -> List[TrainingSetRef]:
-    """
-    Find all standardized training X panels at:
-      dataset/{panel}/training_sets/{tag}/standardized_train__{panel}__{tag}.csv
-
-    Robust to nearby artifacts: skips any '*__train_stats.csv'.
-    If the tag doesn't look like 'trainYYYY_YYYY', we fall back to the X index
-    to infer [start, end].
-    """
     refs: List[TrainingSetRef] = []
     for x_path in root.glob("*/training_sets/*/standardized_train__*__*.csv"):
         name = x_path.name
-        # Skip stats artifacts (these have no Date column)
         if name.endswith("__train_stats.csv"):
             continue
 
-        # path parts: ('dataset', '{panel}', 'training_sets', '{tag}', file)
         try:
             panel = x_path.parts[1]
             tag = x_path.parts[3]
         except Exception:
-            # Unexpected layout; ignore
             continue
 
         se = _infer_train_window_from_tag(tag)
         if se is not None:
             start_s, end_s = se
         else:
-            # Fallback: read the file and infer start/end from the Date index
             X = pd.read_csv(x_path, parse_dates=["Date"]).set_index("Date").sort_index()
             start_s, end_s = str(X.index.min().date()), str(X.index.max().date())
 
@@ -99,25 +83,18 @@ def build_targets_for_all(
     raw_quarterly_csv: Path,
     *,
     monthly_freq: str = "MS",
-    place: str = "start",                # "start" (FRED-style) or "end"
+    place: str = "end",
     panels: Iterable[str] | None = None,
     save_stats: bool = True,
 ) -> List[TrainingSetRef]:
-    """
-    For every discovered training set (optionally filtered by panel),
-    create standardized target y aligned to the X monthly index and z-scored on the
-    training window, then write to dataset/{panel}/baseline/y_target_z__{panel}__{tag}.csv.
-    """
-    # 1) Load raw quarterly target once — force known columns
     yq = read_quarterly_target(
         raw_quarterly_csv,
         date_col="sasdate",
         value_col="gdp_qoq_saar",
     )
-    # Quarter->monthly mapping (default: quarter-start dating)
+    # Quarter->monthly mapping (default: quarter-end dating)
     ym_proto = quarterly_to_monthly(yq, monthly_freq=monthly_freq, place=place)
 
-    # 2) Discover training sets
     refs = _discover_training_sets()
     if panels:
         pset = set(panels)
@@ -125,7 +102,6 @@ def build_targets_for_all(
 
     processed: List[TrainingSetRef] = []
     for r in refs:
-        # Align monthly index to the X panel to ensure exact matching timestamps
         try:
             idx = build_monthly_index_from_panel(r.x_path, date_col="Date", monthly_freq=monthly_freq)
         except Exception as e:
@@ -134,19 +110,16 @@ def build_targets_for_all(
 
         ym = ym_proto.reindex(idx)
 
-        # Guard: if the training window has no quarter observations (non-NaN), skip
         if ym.loc[r.start:r.end].dropna().empty:
             print(f"[SKIP] {r.panel} {r.tag}: no non-NaN target values in {r.start.date()}..{r.end.date()}")
             continue
 
-        # Standardize on [start, end] using non-NaN months
         try:
             yz, stats = standardize_target_on_window(ym, start=r.start, end=r.end)
         except ValueError as e:
             print(f"[SKIP] {r.panel} {r.tag}: {e}")
             continue
 
-        # Write outputs
         r.out_dir.mkdir(parents=True, exist_ok=True)
         yz.to_frame("y").to_csv(r.out_path, index_label="Date")
         if save_stats:
@@ -158,4 +131,3 @@ def build_targets_for_all(
         processed.append(r)
 
     return processed
-
