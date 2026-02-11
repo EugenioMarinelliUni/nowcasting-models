@@ -323,7 +323,13 @@ def run_pseudo_rt_eval(
         if warm_start and hasattr(res, "params_final") and getattr(res, "params_final") is not None:
             last_params = getattr(res, "params_final")
 
-        Y_stack = np.column_stack([Y_monthly, y_quarterly.reshape(-1, 1)]).astype(float)
+        Y_stack_raw = np.column_stack([Y_monthly, y_quarterly.reshape(-1, 1)]).astype(float)
+        # Ensure the smoother sees observations on the same scale used to estimate the
+        # state-space matrices (res.T/Q/C/R).
+        if hasattr(res, "scaler") and getattr(res, "scaler") is not None:
+            Y_stack = res.scaler.transform(Y_stack_raw)
+        else:
+            Y_stack = Y_stack_raw
         ss = StateSpaceParams(T=res.T, Q=res.Q, C=res.C, R=res.R, a0=res.a0, P0=res.P0)
         ks = kalman_filter_smoother(Y_stack, ss)
 

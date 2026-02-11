@@ -2,25 +2,18 @@ from __future__ import annotations
 
 """Fast pseudo real-time evaluation for BM-DFM.
 
-This module provides a drop-in alternative to
-:mod:`dfm_pipeline.eval_pseudort.bm_pseudort`.
+Drop-in alternative to dfm_pipeline.eval_pseudort.bm_pseudort with reduced overhead.
 
-It keeps the same evaluation logic and output schema, but reduces overhead by:
-
-* Converting the full panel to numpy arrays once and slicing by integer position.
-* Applying ragged-edge masks using vectorized numpy operations (grouped by delay).
-* Avoiding repeated pandas `.loc[:t].copy()` inside the eval loop.
-
-Additional optional speed-ups (logic-preserving):
-* Warm-start EM using previous month parameters (sequential mode).
-* Reuse EM cache across evaluation months.
-
-The original evaluator is kept unchanged for comparison.
+Reliability fixes vs the original version in this repo:
+- Apply the model scaler to Y_stack before calling the Kalman smoother.
+- Apply the same scaling to monthly observations used in the quarter-end leakage fix.
+- Only pass init_params/em_cache to fit_fn if the function signature supports them.
 """
 
 from typing import Optional, Literal, Tuple, Callable, Dict, Any
 
 import os
+import inspect
 import numpy as np
 import pandas as pd
 
@@ -131,7 +124,6 @@ def forecast_from_last(
 
 
 def compute_scores(pred_df: pd.DataFrame) -> dict:
-    # Reuse the original implementation by importing lazily to avoid duplication.
     from ..bm_pseudort import compute_scores as _compute
     return _compute(pred_df)
 
@@ -156,13 +148,19 @@ def _mask_ragged_edge_numpy(Xrt: np.ndarray, delay_vec: np.ndarray) -> None:
 
 
 def _set_blas_threads(n: int) -> None:
-    """Prevent BLAS oversubscription when using joblib parallel workers."""
     n = int(n)
     os.environ["OMP_NUM_THREADS"] = str(n)
     os.environ["MKL_NUM_THREADS"] = str(n)
     os.environ["OPENBLAS_NUM_THREADS"] = str(n)
     os.environ["VECLIB_MAXIMUM_THREADS"] = str(n)
     os.environ["NUMEXPR_NUM_THREADS"] = str(n)
+
+
+def _fit_accepts_param(fit_fn: Callable[..., Any], name: str) -> bool:
+    try:
+        return name in inspect.signature(fit_fn).parameters
+    except Exception:
+        return False
 
 
 def run_pseudo_rt_eval_fast(
@@ -172,15 +170,11 @@ def run_pseudo_rt_eval_fast(
     model_config: Any,
     eval_cfg: Any,
     *,
-    warm_start: bool = False,     # NEW
-    n_jobs: int = 1,              # NEW (optional parallel mode)
-    blas_threads: int = 1,        # NEW
+    warm_start: bool = False,
+    n_jobs: int = 1,
+    blas_threads: int = 1,
 ) -> Tuple[pd.DataFrame, dict]:
-    """Fast pseudo real-time evaluation.
-
-    Logic matches :func:`dfm_pipeline.eval_pseudort.bm_pseudort.run_pseudo_rt_eval`
-    but with reduced overhead and optional warm-start.
-    """
+    """Fast pseudo real-time evaluation."""
     if warm_start and int(n_jobs) > 1:
         raise ValueError("warm_start=True is incompatible with n_jobs>1 (sequential dependency).")
 
@@ -227,17 +221,21 @@ def run_pseudo_rt_eval_fast(
     # Fast lookup: timestamp -> integer position in full monthly grid
     pos_map: Dict[pd.Timestamp, int] = {ts: i for i, ts in enumerate(idx_full)}
 
-    # Build EM cache once and reuse across all eval months
-    r_by_block = tuple(int(x) for x in model_config.r_by_block)
-    em_cache = build_em_cache(
-        nM=nM,
-        nQ=1,
-        r_by_block=r_by_block,
-        blocks=getattr(model_config, "blocks", None),
-        enforce_q_loading_constraint=bool(getattr(model_config, "enforce_quarterly_loading_constraint", True)),
-    )
+    accepts_init = _fit_accepts_param(fit_fn, "init_params")
+    accepts_cache = _fit_accepts_param(fit_fn, "em_cache")
 
-    def _one_eval(t: pd.Timestamp, init_params=None) -> list[dict]:
+    em_cache = None
+    if accepts_cache:
+        r_by_block = tuple(int(x) for x in model_config.r_by_block)
+        em_cache = build_em_cache(
+            nM=nM,
+            nQ=1,
+            r_by_block=r_by_block,
+            blocks=getattr(model_config, "blocks", None),
+            enforce_q_loading_constraint=bool(getattr(model_config, "enforce_quarterly_loading_constraint", True)),
+        )
+
+    def _one_eval(t: pd.Timestamp, init_params=None) -> tuple[list[dict], Any]:
         end_idx = pos_map[pd.Timestamp(t)]
         Xrt = X_arr[: end_idx + 1, :].copy()
 
@@ -249,16 +247,18 @@ def run_pseudo_rt_eval_fast(
         if d > 0 and yrt.size >= d:
             yrt[-d:] = np.nan
 
-        res = fit_fn(
-            Y_monthly=Xrt,
-            y_quarterly=yrt,
-            config=model_config,
-            init_params=init_params,
-            em_cache=em_cache,
-        )
+        call_kwargs: Dict[str, Any] = dict(Y_monthly=Xrt, y_quarterly=yrt, config=model_config)
+        if accepts_init:
+            call_kwargs["init_params"] = init_params
+        if accepts_cache and em_cache is not None:
+            call_kwargs["em_cache"] = em_cache
 
-        # State-space for running smoother on the pseudo-vintage
-        Y_stack = np.column_stack([Xrt, yrt.reshape(-1, 1)]).astype(float)
+        res = fit_fn(**call_kwargs)
+
+        # State-space for running smoother on the pseudo-vintage (must be on the same scale)
+        Y_stack_raw = np.column_stack([Xrt, yrt.reshape(-1, 1)]).astype(float)
+        Y_stack = res.scaler.transform(Y_stack_raw)
+
         ss = StateSpaceParams(T=res.T, Q=res.Q, C=res.C, R=res.R, a0=res.a0, P0=res.P0)
         ks = kalman_filter_smoother(Y_stack, ss)
 
@@ -292,22 +292,25 @@ def run_pseudo_rt_eval_fast(
                 if pos_td is not None and pos_td <= end_idx:
                     idx_td = int(pos_td)
 
-                    # Quarter-end leakage fix (same logic as original fast evaluator)
+                    # Quarter-end leakage fix: update with monthly indicators only (scaled)
                     if h == "now" and pd.Timestamp(target_date) == pd.Timestamp(t):
                         a_pr = ks.a_pred[idx_td, :].astype(float)
                         P_pr = ks.P_pred[idx_td, :, :].astype(float)
 
-                        x_row = Xrt[idx_td, :]
-                        obs_idx = np.where(np.isfinite(x_row))[0]
+                        x_row_raw = Xrt[idx_td, :]
+                        obs_idx = np.where(np.isfinite(x_row_raw))[0]
 
                         if obs_idx.size == 0:
                             a_upd = a_pr
                         else:
+                            row_raw = np.concatenate([x_row_raw, np.array([np.nan], dtype=float)], axis=0)[None, :]
+                            row_scaled = res.scaler.transform(row_raw)[0, :nM]
+
                             C_m = res.C[:nM, :]
                             R_m = res.R[:nM, :nM]
                             C_sub = C_m[obs_idx, :]
                             R_sub = R_m[np.ix_(obs_idx, obs_idx)]
-                            y_obs = x_row[obs_idx]
+                            y_obs = row_scaled[obs_idx]
                             a_upd, _P_upd = _kalman_update_subset(a_pr, P_pr, y_obs, C_sub, R_sub)
 
                         pred = float(Cq @ a_upd)
@@ -334,7 +337,6 @@ def run_pseudo_rt_eval_fast(
                 }
             )
 
-        # Return both output rows and the last fitted params (for warm-start chaining)
         return out_rows, getattr(res, "params_final", None)
 
     rows: list[dict] = []
@@ -343,7 +345,8 @@ def run_pseudo_rt_eval_fast(
     if int(n_jobs) <= 1:
         last_params = None
         for t in eval_dates:
-            out_rows, params_out = _one_eval(t, init_params=(last_params if warm_start else None))
+            init_params = last_params if (warm_start and accepts_init) else None
+            out_rows, params_out = _one_eval(t, init_params=init_params)
             rows.extend(out_rows)
             if warm_start and params_out is not None:
                 last_params = params_out
