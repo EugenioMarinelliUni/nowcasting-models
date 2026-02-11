@@ -6,8 +6,15 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src.dfm_pipeline.dfm_bm_ml.fit import fit_bm_dfm
-from src.dfm_pipeline.dfm_bm_ml.spec import BMDfmConfig
+try:
+    from dfm_pipeline.dfm_bm_ml import fit_bm_dfm
+    from dfm_pipeline.dfm_bm_ml.spec import BMDfmConfig
+except ImportError:  # allow running without installing the package
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+    from dfm_pipeline.dfm_bm_ml import fit_bm_dfm
+    from dfm_pipeline.dfm_bm_ml.spec import BMDfmConfig
 
 
 def _parse_args() -> argparse.Namespace:
