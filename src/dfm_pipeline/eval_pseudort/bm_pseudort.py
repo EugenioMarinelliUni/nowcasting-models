@@ -373,7 +373,16 @@ def run_pseudo_rt_eval(
                             R_m = res.R[:nM, :nM]
                             C_sub = C_m[obs_idx, :]
                             R_sub = R_m[np.ix_(obs_idx, obs_idx)]
-                            y_obs = x_row[obs_idx]
+
+                            # Important: the state-space matrices (C/R) are defined on the
+                            # scaled data used in estimation. So the monthly observations fed
+                            # into this special update must be scaled consistently.
+                            if hasattr(res, "scaler") and getattr(res, "scaler") is not None:
+                                row_raw = np.concatenate([x_row, np.array([np.nan], dtype=float)], axis=0)[None, :]
+                                row_scaled = res.scaler.transform(row_raw)[0, :nM]
+                                y_obs = row_scaled[obs_idx]
+                            else:
+                                y_obs = x_row[obs_idx]
                             a_upd, _P_upd = _kalman_update_subset(a_pr, P_pr, y_obs, C_sub, R_sub)
 
                         pred = float(Cq @ a_upd)
