@@ -33,6 +33,9 @@ def fit_bm_dfm(
     truth while preserving the historical `fit_bm_dfm(...)` call signature.
     """
 
+    # Fail fast on config inconsistencies that can silently break correctness.
+    config.validate()
+
     from .fast.fit_fast import fit_bm_dfm_fast
 
     return fit_bm_dfm_fast(

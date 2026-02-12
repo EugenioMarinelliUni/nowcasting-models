@@ -47,6 +47,9 @@ def fit_bm_dfm_fast_numba(
     init_params: BMParams | None = None,
     em_cache: EMStepCache | None = None,
 ) -> BMDfmResult:
+    # Validate invariants early so mistakes fail loudly.
+    config.validate()
+
     if int(config.n_quarterly) != 1:
         raise ValueError("This implementation supports n_quarterly=1 (single quarterly target).")
 
@@ -178,10 +181,24 @@ def fit_bm_dfm_fast_numba(
             pbar.set_postfix_str(f"loglik={ll:.2f}")
             continue
 
-        delta = loglik_trace[-1] - loglik_trace[-2]
-        pbar.set_postfix_str(f"loglik={ll:.2f}, dLL={delta:.3e}")
-        if it >= 2 and abs(delta) < float(config.tol):
-            pbar.set_postfix_str(f"loglik={ll:.2f}, converged")
+        ll_prev = float(loglik_trace[-2])
+        ll_cur = float(loglik_trace[-1])
+        delta = ll_cur - ll_prev
+
+        if config.convergence_mode == "abs":
+            crit = abs(delta)
+        else:
+            denom = 0.5 * (abs(ll_cur) + abs(ll_prev))
+            denom = denom if denom > 0.0 else 1.0
+            crit = abs(delta) / denom
+
+        if config.convergence_mode == "abs":
+            pbar.set_postfix_str(f"loglik={ll_cur:.2f}, dLL={delta:.3e}")
+        else:
+            pbar.set_postfix_str(f"loglik={ll_cur:.2f}, dLL={delta:.3e}, rel={crit:.3e}")
+
+        if it >= 2 and crit < float(config.tol):
+            pbar.set_postfix_str(f"loglik={ll_cur:.2f}, converged")
             break
 
     if a_last is None or P_last is None or P_lag_last is None:
