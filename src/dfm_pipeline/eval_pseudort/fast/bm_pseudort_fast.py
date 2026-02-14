@@ -1,330 +1,125 @@
 from __future__ import annotations
 
-"""Fast pseudo real-time evaluation for BM-DFM.
+import json
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable
 
-Drop-in alternative to dfm_pipeline.eval_pseudort.bm_pseudort with reduced overhead.
-
-Reliability fixes vs the original version in this repo:
-- Apply the model scaler to Y_stack before calling the Kalman smoother.
-- Apply the same scaling to monthly observations used in the quarter-end leakage fix.
-- Only pass init_params/em_cache to fit_fn if the function signature supports them.
-"""
-
-from typing import Optional, Literal, Tuple, Callable, Dict, Any
-
-import os
-import inspect
 import numpy as np
 import pandas as pd
 
-from dfm_pipeline.dfm_dyn.state_space import StateSpaceParams, kalman_filter_smoother
-
-from dfm_pipeline.dfm_bm_ml.fast.em_fast import build_em_cache
-
-
-Horizon = Literal["bac", "now", "for"]
-DelayStyle = Literal["none", "trailing_nan", "json_map"]
-
-
-def month_of_quarter(d: pd.Timestamp) -> int:
-    m = int(d.month)
-    r = m % 3
-    return 3 if r == 0 else r
+from dfm_pipeline.dfm_bm_ml.types import BMDfmResult, BMParams, EMStepCache
+from dfm_pipeline.dfm_dyn.state_space_new import kalman_filter, kalman_smoother
+from dfm_pipeline.eval_pseudort.bm_pseudort import (
+    PseudoRTEvalConfig,
+    _apply_delay_mask,
+    _apply_quarterly_release_mask,
+    _horizon_target_date,
+    _month_of_quarter,
+    compute_scores,
+)
 
 
-def quarter_end_stamp(d: pd.Timestamp) -> pd.Timestamp:
-    q = (int(d.month) - 1) // 3 + 1
-    end_month = 3 * q
-    return pd.Timestamp(year=int(d.year), month=end_month, day=1)
+FitCallable = Callable[
+    [np.ndarray, np.ndarray, object, BMParams | None, EMStepCache | None],
+    BMDfmResult,
+]
 
 
-def add_months(d: pd.Timestamp, k: int) -> pd.Timestamp:
-    return (d.to_period("M") + int(k)).to_timestamp(how="start")
+@dataclass
+class FastPseudoRTOptions:
+    warm_start: bool = False
+    n_jobs: int = 1
+    blas_threads: int = 1
 
 
-def months_diff(start: pd.Timestamp, end: pd.Timestamp) -> int:
-    return (int(end.year) - int(start.year)) * 12 + (int(end.month) - int(start.month))
-
-
-def trailing_nan_delays(X: pd.DataFrame) -> pd.Series:
-    delays: dict[str, int] = {}
-    arr = X.to_numpy()
-    for j, c in enumerate(X.columns):
-        col = arr[:, j]
-        k = 0
-        for v in col[::-1]:
-            if np.isfinite(v):
-                break
-            k += 1
-        delays[str(c)] = int(k)
-    return pd.Series(delays)
-
-
-def _sym(A: np.ndarray) -> np.ndarray:
-    return 0.5 * (A + A.T)
-
-
-def _chol_factor(A: np.ndarray, jitter: float = 1e-10, max_tries: int = 8) -> np.ndarray:
-    A = _sym(A)
-    j = 0.0
-    for _ in range(max_tries):
-        try:
-            return np.linalg.cholesky(A + j * np.eye(A.shape[0]))
-        except np.linalg.LinAlgError:
-            j = jitter if j == 0.0 else (10.0 * j)
-    w, V = np.linalg.eigh(A)
-    w = np.maximum(w, jitter)
-    A_pd = (V * w) @ V.T
-    return np.linalg.cholesky(_sym(A_pd))
-
-
-def _chol_solve(L: np.ndarray, B: np.ndarray) -> np.ndarray:
-    y = np.linalg.solve(L, B)
-    return np.linalg.solve(L.T, y)
-
-
-def _kalman_update_subset(
-    a_pr: np.ndarray,
-    P_pr: np.ndarray,
-    y_obs: np.ndarray,
-    C_sub: np.ndarray,
-    R_sub: np.ndarray,
-) -> Tuple[np.ndarray, np.ndarray]:
-    if y_obs.size == 0:
-        return a_pr, P_pr
-
-    v = y_obs - C_sub @ a_pr
-    S = _sym(C_sub @ P_pr @ C_sub.T + R_sub)
-
-    L = _chol_factor(S, jitter=1e-10)
-    B = C_sub @ P_pr
-    S_inv_B = _chol_solve(L, B)
-    K = S_inv_B.T
-
-    I_m = np.eye(P_pr.shape[0])
-    I_KC = I_m - K @ C_sub
-    P_upd = _sym(I_KC @ P_pr @ I_KC.T + K @ R_sub @ K.T)
-    a_upd = a_pr + K @ v
-    return a_upd, P_upd
-
-
-def forecast_from_last(
-    T: np.ndarray,
-    Q: np.ndarray,
-    a_last: np.ndarray,
-    P_last: np.ndarray,
-    steps: int,
-) -> Tuple[np.ndarray, np.ndarray]:
-    a = a_last.copy()
-    P = P_last.copy()
-    for _ in range(int(steps)):
-        a = T @ a
-        P = T @ P @ T.T + Q
-    return a, P
-
-
-def compute_scores(pred_df: pd.DataFrame) -> dict:
-    from ..bm_pseudort import compute_scores as _compute
-    return _compute(pred_df)
-
-
-def _mask_ragged_edge_numpy(Xrt: np.ndarray, delay_vec: np.ndarray) -> None:
-    """In-place ragged-edge mask on the last d rows per column."""
-    Tn = Xrt.shape[0]
-    if Tn == 0:
-        return
-
-    dvals = np.unique(delay_vec)
-    for d in dvals:
-        d = int(d)
-        if d <= 0:
-            continue
-        if Tn < d:
-            continue
-        cols = np.where(delay_vec == d)[0]
-        if cols.size == 0:
-            continue
-        Xrt[-d:, cols] = np.nan
-
-
-def _set_blas_threads(n: int) -> None:
-    n = int(n)
-    os.environ["OMP_NUM_THREADS"] = str(n)
-    os.environ["MKL_NUM_THREADS"] = str(n)
-    os.environ["OPENBLAS_NUM_THREADS"] = str(n)
-    os.environ["VECLIB_MAXIMUM_THREADS"] = str(n)
-    os.environ["NUMEXPR_NUM_THREADS"] = str(n)
-
-
-def _fit_accepts_param(fit_fn: Callable[..., Any], name: str) -> bool:
-    try:
-        return name in inspect.signature(fit_fn).parameters
-    except Exception:
-        return False
+def _maybe_scale_observations_for_smoother(Y_stack: np.ndarray, res: BMDfmResult) -> np.ndarray:
+    scaler = getattr(res, "scaler", None)
+    if scaler is None:
+        return Y_stack
+    return scaler.transform(Y_stack)
 
 
 def run_pseudo_rt_eval_fast(
     X_full: pd.DataFrame,
     y_full: pd.Series,
-    fit_fn: Callable[..., Any],
-    model_config: Any,
-    eval_cfg: Any,
-    *,
+    fit_fn: FitCallable,
+    model_config,
+    eval_cfg: PseudoRTEvalConfig,
     warm_start: bool = False,
     n_jobs: int = 1,
     blas_threads: int = 1,
-) -> Tuple[pd.DataFrame, dict]:
-    """Fast pseudo real-time evaluation."""
-    if warm_start and int(n_jobs) > 1:
-        raise ValueError("warm_start=True is incompatible with n_jobs>1 (sequential dependency).")
+) -> tuple[pd.DataFrame, dict]:
+    # Parse eval window
+    eval_start = pd.Timestamp(eval_cfg.eval_start)
+    eval_end = pd.Timestamp(eval_cfg.eval_end)
 
-    if not isinstance(X_full.index, pd.DatetimeIndex):
-        raise TypeError("X_full must be indexed by DatetimeIndex.")
-    if not isinstance(y_full.index, pd.DatetimeIndex):
-        raise TypeError("y_full must be indexed by DatetimeIndex.")
+    idx = X_full.index
+    eval_months = idx[(idx >= eval_start) & (idx <= eval_end)]
+    if eval_months.empty:
+        raise ValueError("No eval months in requested window after alignment with panel index.")
 
-    X_full = X_full.sort_index()
-    y_full = y_full.sort_index()
+    delay_map = None
+    if eval_cfg.delay_style == "json_map":
+        if not eval_cfg.delay_json:
+            raise ValueError("delay_style='json_map' requires delay_json.")
+        delay_map = json.loads(Path(eval_cfg.delay_json).read_text(encoding="utf-8"))
 
-    eval_start = pd.to_datetime(eval_cfg.eval_start)
-    eval_end = pd.to_datetime(eval_cfg.eval_end)
+    out_rows: list[dict] = []
 
-    idx_full = X_full.index
-    in_window = (idx_full >= eval_start) & (idx_full <= eval_end)
-    eval_dates = idx_full[in_window]
-    if eval_dates.empty:
-        raise ValueError("Evaluation window produced no dates on the panel monthly grid.")
-
-    # Resolve delays
-    if eval_cfg.delay_style == "trailing_nan":
-        delays = trailing_nan_delays(X_full)
-        delay_vec = delays.reindex(X_full.columns).fillna(0).astype(int).to_numpy(dtype=int)
-    elif eval_cfg.delay_style == "json_map":
-        if getattr(eval_cfg, "delay_json", None) is None:
-            raise ValueError("delay_style='json_map' requires delay_json path.")
-        delays = pd.Series(pd.read_json(eval_cfg.delay_json, typ="series"))
-        delay_vec = delays.reindex(X_full.columns).fillna(0).astype(int).to_numpy(dtype=int)
-    elif eval_cfg.delay_style == "none":
-        delay_vec = np.zeros((X_full.shape[1],), dtype=int)
-    else:
-        raise ValueError(f"Unknown delay_style: {eval_cfg.delay_style!r}")
-
-    # Convert once to numpy
-    X_arr = X_full.to_numpy(dtype=float, copy=False)
-
-    # Align the quarterly series to the monthly index once
-    y_aligned = y_full.reindex(idx_full)
-    y_arr = y_aligned.to_numpy(dtype=float, copy=False)
-
-    nM = int(X_arr.shape[1])
-
-    # Fast lookup: timestamp -> integer position in full monthly grid
-    pos_map: Dict[pd.Timestamp, int] = {ts: i for i, ts in enumerate(idx_full)}
-
-    accepts_init = _fit_accepts_param(fit_fn, "init_params")
-    accepts_cache = _fit_accepts_param(fit_fn, "em_cache")
-
+    init_params = None
     em_cache = None
-    if accepts_cache:
-        r_by_block = tuple(int(x) for x in model_config.r_by_block)
-        em_cache = build_em_cache(
-            nM=nM,
-            nQ=1,
-            r_by_block=r_by_block,
-            blocks=getattr(model_config, "blocks", None),
-            enforce_q_loading_constraint=bool(getattr(model_config, "enforce_quarterly_loading_constraint", True)),
+
+    for t in eval_months:
+        X_work = X_full.loc[:t].copy()
+        y_work = y_full.loc[:t].copy()
+
+        X_work = _apply_delay_mask(X_work, t, eval_cfg.delay_style, delay_map)
+        y_work = _apply_quarterly_release_mask(y_work, t, eval_cfg.gdp_rel)
+
+        res = fit_fn(
+            X_work.to_numpy(dtype=float),
+            y_work.to_numpy(dtype=float),
+            model_config,
+            init_params if warm_start else None,
+            em_cache if warm_start else None,
         )
 
-    def _one_eval(t: pd.Timestamp, init_params=None) -> tuple[list[dict], Any]:
-        end_idx = pos_map[pd.Timestamp(t)]
-        Xrt = X_arr[: end_idx + 1, :].copy()
+        if warm_start:
+            init_params = res.params
+            em_cache = res.em_cache
 
-        if eval_cfg.delay_style != "none":
-            _mask_ragged_edge_numpy(Xrt, delay_vec)
+        Y_stack = np.column_stack([X_full.to_numpy(dtype=float), y_full.to_numpy(dtype=float)])
+        Y_stack_scaled = _maybe_scale_observations_for_smoother(Y_stack, res)
 
-        yrt = y_arr[: end_idx + 1].copy()
-        d = int(getattr(eval_cfg, "gdp_rel", 0))
-        if d > 0 and yrt.size >= d:
-            yrt[-d:] = np.nan
+        ss = res.state_space
+        kf = kalman_filter(Y=Y_stack_scaled, T=ss.T, Z=ss.C, R=ss.R, Q=ss.Q, a0=ss.a0, P0=ss.P0)
+        ks = kalman_smoother(kf)
 
-        call_kwargs: Dict[str, Any] = dict(Y_monthly=Xrt, y_quarterly=yrt, config=model_config)
-        if accepts_init:
-            call_kwargs["init_params"] = init_params
-        if accepts_cache and em_cache is not None:
-            call_kwargs["em_cache"] = em_cache
+        a_smooth = ks["a_smooth"]
+        C = ss.C
 
-        res = fit_fn(**call_kwargs)
+        t_moq = _month_of_quarter(pd.Timestamp(t))
 
-        # State-space for running smoother on the pseudo-vintage (must be on the same scale)
-        Y_stack_raw = np.column_stack([Xrt, yrt.reshape(-1, 1)]).astype(float)
-        Y_stack = res.scaler.transform(Y_stack_raw)
-
-        ss = StateSpaceParams(T=res.T, Q=res.Q, C=res.C, R=res.R, a0=res.a0, P0=res.P0)
-        ks = kalman_filter_smoother(Y_stack, ss)
-
-        Cq = res.C[nM, :].astype(float)
-
-        a_t_filt = ks.a_filt[-1, :].astype(float)
-        P_t_filt = ks.P_filt[-1, :, :].astype(float)
-
-        t_moq = month_of_quarter(pd.Timestamp(t))
-        iQ = quarter_end_stamp(pd.Timestamp(t))
-
-        targets: dict[Horizon, pd.Timestamp] = {
-            "bac": add_months(iQ, -3),
-            "now": iQ,
-            "for": add_months(iQ, 3),
-        }
-
-        out_rows: list[dict] = []
+        scaler = getattr(res, "scaler", None)
+        mu_y = float(getattr(scaler, "mu", np.array([0.0]))[-1]) if scaler is not None else 0.0
+        sd_y = float(getattr(scaler, "sd", np.array([1.0]))[-1]) if scaler is not None else 1.0
 
         for h in eval_cfg.horizons:
-            target_date = targets[h]
-
-            if target_date not in y_full.index:
-                pred = np.nan
-                actual = np.nan
+            target_date = _horizon_target_date(pd.Timestamp(t), h)
+            if target_date not in idx:
+                pred_scaled = float("nan")
+                actual_raw = float("nan")
             else:
-                actual = float(y_full.loc[target_date])
+                target_idx = idx.get_loc(target_date)
+                Cq = C[-1, :]
+                pred_scaled = float(Cq @ a_smooth[target_idx, :])
+                actual_raw = float(y_full.loc[target_date])
 
-                pos_td = pos_map.get(pd.Timestamp(target_date), None)
-
-                if pos_td is not None and pos_td <= end_idx:
-                    idx_td = int(pos_td)
-
-                    # Quarter-end leakage fix: update with monthly indicators only (scaled)
-                    if h == "now" and pd.Timestamp(target_date) == pd.Timestamp(t):
-                        a_pr = ks.a_pred[idx_td, :].astype(float)
-                        P_pr = ks.P_pred[idx_td, :, :].astype(float)
-
-                        x_row_raw = Xrt[idx_td, :]
-                        obs_idx = np.where(np.isfinite(x_row_raw))[0]
-
-                        if obs_idx.size == 0:
-                            a_upd = a_pr
-                        else:
-                            row_raw = np.concatenate([x_row_raw, np.array([np.nan], dtype=float)], axis=0)[None, :]
-                            row_scaled = res.scaler.transform(row_raw)[0, :nM]
-
-                            C_m = res.C[:nM, :]
-                            R_m = res.R[:nM, :nM]
-                            C_sub = C_m[obs_idx, :]
-                            R_sub = R_m[np.ix_(obs_idx, obs_idx)]
-                            y_obs = row_scaled[obs_idx]
-                            a_upd, _P_upd = _kalman_update_subset(a_pr, P_pr, y_obs, C_sub, R_sub)
-
-                        pred = float(Cq @ a_upd)
-                    else:
-                        a_td = ks.a_smooth[idx_td, :].astype(float)
-                        pred = float(Cq @ a_td)
-
-                else:
-                    steps = months_diff(pd.Timestamp(t), pd.Timestamp(target_date))
-                    if steps < 0:
-                        pred = np.nan
-                    else:
-                        a_f, _P_f = forecast_from_last(res.T, res.Q, a_t_filt, P_t_filt, steps=steps)
-                        pred = float(Cq @ a_f)
+            pred_raw = float(pred_scaled * sd_y + mu_y) if np.isfinite(pred_scaled) else float("nan")
+            actual_scaled = (
+                float((actual_raw - mu_y) / sd_y) if np.isfinite(actual_raw) and sd_y != 0 else float("nan")
+            )
 
             out_rows.append(
                 {
@@ -332,46 +127,17 @@ def run_pseudo_rt_eval_fast(
                     "moq": int(t_moq),
                     "horizon": h,
                     "target_date": pd.Timestamp(target_date),
-                    "pred": pred,
-                    "actual": actual,
+                    "pred_scaled": pred_scaled,
+                    "actual_scaled": actual_scaled,
+                    "pred_raw": pred_raw,
+                    "actual_raw": actual_raw,
+                    "pred": pred_raw,
+                    "actual": actual_raw,
+                    "scaling_mode": str(getattr(model_config, "scaling_mode", "")),
                 }
             )
 
-        return out_rows, getattr(res, "params_final", None)
-
-    rows: list[dict] = []
-
-    # Sequential mode (supports warm_start)
-    if int(n_jobs) <= 1:
-        last_params = None
-        for t in eval_dates:
-            init_params = last_params if (warm_start and accepts_init) else None
-            out_rows, params_out = _one_eval(t, init_params=init_params)
-            rows.extend(out_rows)
-            if warm_start and params_out is not None:
-                last_params = params_out
-
-    # Parallel mode (no warm-start)
-    else:
-        try:
-            from joblib import Parallel, delayed
-        except ImportError as e:
-            raise ImportError("joblib is required for n_jobs > 1 parallel evaluation.") from e
-
-        def _worker(t):
-            _set_blas_threads(blas_threads)
-            out_rows, _ = _one_eval(t, init_params=None)
-            return out_rows
-
-        chunks = Parallel(n_jobs=int(n_jobs), backend="loky")(
-            delayed(_worker)(t) for t in eval_dates
-        )
-        for ch in chunks:
-            rows.extend(ch)
-
-    pred_df = pd.DataFrame(rows)
-    pred_df["eval_date"] = pd.to_datetime(pred_df["eval_date"])
-    pred_df["target_date"] = pd.to_datetime(pred_df["target_date"])
-
+    pred_df = pd.DataFrame(out_rows).sort_values(["eval_date", "horizon", "moq"]).reset_index(drop=True)
     scores = compute_scores(pred_df)
+
     return pred_df, scores
