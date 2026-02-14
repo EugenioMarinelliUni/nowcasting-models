@@ -69,7 +69,11 @@ def main() -> None:
     parser.add_argument("--monthly-meas-var-floor", default=1e-4, type=float)
     parser.add_argument("--quarterly-meas-var-floor", default=1e-4, type=float)
 
-    parser.add_argument("--scaling-mode", default="external_frozen", choices=["external_frozen", "internal_per_run"])
+    parser.add_argument(
+        "--scaling-mode",
+        default="external_frozen",
+        choices=["external_frozen", "internal_per_run", "toolbox_vintage"],
+    )
 
     parser.add_argument("--idio-ar1", dest="idio_ar1", action="store_true", default=True)
     parser.add_argument("--no-idio-ar1", dest="idio_ar1", action="store_false")

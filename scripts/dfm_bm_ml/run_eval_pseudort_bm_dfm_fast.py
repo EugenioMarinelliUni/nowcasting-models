@@ -8,8 +8,8 @@ from typing import Any, Dict
 
 import pandas as pd
 
+from dfm_pipeline.dfm_bm_ml.fast.fit_fast import fit_bm_dfm_fast
 from dfm_pipeline.dfm_bm_ml.spec import BMDfmConfig
-from dfm_pipeline.dfm_bm_ml.fast import fit_bm_dfm_fast
 from dfm_pipeline.eval_pseudort.bm_pseudort import PseudoRTEvalConfig
 from dfm_pipeline.eval_pseudort.fast import run_pseudo_rt_eval_fast
 
@@ -47,14 +47,14 @@ def main() -> None:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
-    parser.add_argument("--panel-csv", required=True, help="Path to monthly panel CSV (X).")
-    parser.add_argument("--target-csv", required=True, help="Path to target CSV (y on monthly index).")
-    parser.add_argument("--date-col", default="sasdate", help="Name of date column in both CSV files.")
-    parser.add_argument("--target-col", required=True, help="Name of target column in target CSV.")
-    parser.add_argument("--outdir", required=True, help="Output directory for predictions and scores.")
+    parser.add_argument("--panel-csv", required=True)
+    parser.add_argument("--target-csv", required=True)
+    parser.add_argument("--date-col", default="sasdate")
+    parser.add_argument("--target-col", required=True)
+    parser.add_argument("--outdir", required=True)
 
-    parser.add_argument("--r", type=int, required=True, help="Number of factors (single block).")
-    parser.add_argument("--p", type=int, required=True, help="Factor VAR lag order (internally capped at 5).")
+    parser.add_argument("--r", type=int, required=True)
+    parser.add_argument("--p", type=int, required=True)
 
     parser.add_argument("--mm-style", choices=["toolbox", "scaled"], default="toolbox")
     parser.add_argument("--pca-fill", default="mean", choices=["mean", "ffill"])
@@ -69,7 +69,11 @@ def main() -> None:
     parser.add_argument("--monthly-meas-var-floor", default=1e-4, type=float)
     parser.add_argument("--quarterly-meas-var-floor", default=1e-4, type=float)
 
-    parser.add_argument("--scaling-mode", default="external_frozen", choices=["external_frozen", "internal_per_run"])
+    parser.add_argument(
+        "--scaling-mode",
+        default="external_frozen",
+        choices=["external_frozen", "internal_per_run", "toolbox_vintage"],
+    )
 
     parser.add_argument("--idio-ar1", dest="idio_ar1", action="store_true", default=True)
     parser.add_argument("--no-idio-ar1", dest="idio_ar1", action="store_false")
@@ -88,12 +92,12 @@ def main() -> None:
     parser.add_argument("--no-force-var-stability", dest="force_var_stability", action="store_false")
     parser.add_argument("--var-stability-shrink", default=0.98, type=float)
 
-    parser.add_argument("--eval-start", required=True, help="Evaluation start date (YYYY-MM-DD).")
-    parser.add_argument("--eval-end", required=True, help="Evaluation end date (YYYY-MM-DD).")
+    parser.add_argument("--eval-start", required=True)
+    parser.add_argument("--eval-end", required=True)
 
     parser.add_argument("--delay-style", choices=["none", "trailing_nan", "json_map"], default="none")
-    parser.add_argument("--delay-json", default=None, help="JSON file for delays (required if delay-style=json_map).")
-    parser.add_argument("--gdp-rel", type=int, default=0, help="Release lag in months for quarterly target masking.")
+    parser.add_argument("--delay-json", default=None)
+    parser.add_argument("--gdp-rel", type=int, default=0)
 
     parser.add_argument("--warm-start", action="store_true")
     parser.add_argument("--n-jobs", type=int, default=1)
