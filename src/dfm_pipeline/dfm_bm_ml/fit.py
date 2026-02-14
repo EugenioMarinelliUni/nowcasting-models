@@ -1,45 +1,24 @@
 from __future__ import annotations
 
-from typing import Any
-
-import numpy as np
-
-from .spec import BMDfmConfig, BMDfmResult
-from .state_builder import BMParams
-
-
-try:
-    # Optional type (used only for warm-start caches in the fast path)
-    from .fast.em_fast import EMStepCache
-except Exception:  # pragma: no cover
-    EMStepCache = Any  # type: ignore
+from dfm_pipeline.dfm_bm_ml.fast.fit_fast import fit_bm_dfm_fast
+from dfm_pipeline.dfm_bm_ml.spec import BMDfmConfig
+from dfm_pipeline.dfm_bm_ml.types import BMDfmResult, BMParams, EMStepCache
 
 
 def fit_bm_dfm(
-    Y_monthly: np.ndarray,  # (T, nM) with NaNs
-    y_quarterly: np.ndarray,  # (T,) with NaNs except quarter-end months
+    X_monthly,
+    y_quarterly,
     config: BMDfmConfig,
-    *,
     init_params: BMParams | None = None,
     em_cache: EMStepCache | None = None,
 ) -> BMDfmResult:
-    """Public BM-DFM entrypoint.
-
-    The original implementation in this repository diverged from the maintained
-    fast implementation and became API-incompatible with the current EM/state
-    builder code.
-
-    This wrapper makes the stable fast implementation the single source of
-    truth while preserving the historical `fit_bm_dfm(...)` call signature.
     """
+    Default BM-DFM fitter entrypoint.
 
-    # Fail fast on config inconsistencies that can silently break correctness.
-    config.validate()
-
-    from .fast.fit_fast import fit_bm_dfm_fast
-
+    Currently routes to the fast implementation.
+    """
     return fit_bm_dfm_fast(
-        Y_monthly=Y_monthly,
+        X_monthly=X_monthly,
         y_quarterly=y_quarterly,
         config=config,
         init_params=init_params,

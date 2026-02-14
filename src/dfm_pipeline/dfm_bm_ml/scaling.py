@@ -5,68 +5,49 @@ from typing import Literal
 
 import numpy as np
 
+ScalingMode = Literal["external_frozen", "internal_per_run", "toolbox_vintage"]
 
-ScalingMode = Literal["external_frozen", "internal_per_run"]
 
-
-@dataclass(frozen=True)
+@dataclass
 class PanelScaler:
-    """
-    Column-wise scaler for a panel.
-
-    Conventions:
-    - internal_per_run: Ys = (Y - mu) / sd, with mu/sd estimated on current Y (ignoring NaNs).
-    - external_frozen: Ys = Y, mu=0, sd=1 (identity; caller guarantees Y already scaled).
-    """
     mode: ScalingMode
-    mu: np.ndarray  # (n,)
-    sd: np.ndarray  # (n,)
+    mu: np.ndarray
+    sd: np.ndarray
 
     def transform(self, Y: np.ndarray) -> np.ndarray:
-        Y = np.asarray(Y, dtype=float)
         if self.mode == "external_frozen":
             return Y
         return (Y - self.mu) / self.sd
 
-    def inverse_transform(self, Ys: np.ndarray) -> np.ndarray:
-        Ys = np.asarray(Ys, dtype=float)
+    def inverse_transform(self, Z: np.ndarray) -> np.ndarray:
         if self.mode == "external_frozen":
-            return Ys
-        return Ys * self.sd + self.mu
+            return Z
+        return Z * self.sd + self.mu
 
 
-def scale_panel(Y: np.ndarray, mode: ScalingMode) -> tuple[np.ndarray, PanelScaler]:
+def _nanmean_std(Y: np.ndarray, min_std: float = 1e-12) -> tuple[np.ndarray, np.ndarray]:
+    mu = np.nanmean(Y, axis=0)
+    sd = np.nanstd(Y, axis=0, ddof=0)
+    sd = np.maximum(sd, min_std)
+    return mu, sd
+
+
+def scale_panel(
+    Y: np.ndarray,
+    mode: ScalingMode,
+    min_std: float = 1e-12,
+) -> tuple[np.ndarray, PanelScaler]:
     """
-    Scale a panel according to `mode` and return (Ys, scaler).
-
-    Notes:
-    - NaNs are ignored when estimating mu/sd.
-    - For columns with all-NaN or zero variance, uses mu=0 and sd=1.
+    Standardize a 2D panel Y (T x N) under either:
+      - external_frozen: no-op (assume already standardized)
+      - internal_per_run/toolbox_vintage: compute nanmean/nanstd and standardize
     """
-    Y = np.asarray(Y, dtype=float)
-
-    n = int(Y.shape[1])
-
     if mode == "external_frozen":
-        mu = np.zeros((n,), dtype=float)
-        sd = np.ones((n,), dtype=float)
+        mu = np.zeros(Y.shape[1], dtype=float)
+        sd = np.ones(Y.shape[1], dtype=float)
         return Y, PanelScaler(mode=mode, mu=mu, sd=sd)
 
-    if mode == "internal_per_run":
-        mu = np.nanmean(Y, axis=0)
-        sd = np.nanstd(Y, axis=0, ddof=0)
-
-        bad_mu = ~np.isfinite(mu)
-        bad_sd = (~np.isfinite(sd)) | (sd == 0.0)
-
-        if np.any(bad_mu):
-            mu = mu.copy()
-            mu[bad_mu] = 0.0
-        if np.any(bad_sd):
-            sd = sd.copy()
-            sd[bad_sd] = 1.0
-
-        Ys = (Y - mu) / sd
-        return Ys, PanelScaler(mode=mode, mu=mu.astype(float), sd=sd.astype(float))
-
-    raise ValueError(f"Unknown scaling mode: {mode!r}")
+    # toolbox_vintage is an alias of internal_per_run; keep mode label for bookkeeping.
+    mu, sd = _nanmean_std(Y, min_std=min_std)
+    Z = (Y - mu) / sd
+    return Z, PanelScaler(mode=mode, mu=mu, sd=sd)

@@ -1,242 +1,102 @@
 from __future__ import annotations
 
-"""
-Numba-accelerated fast fitter for the Banbura–Modugno (2014) mixed-frequency DFM.
+from dataclasses import replace
 
-Same public behavior as dfm_pipeline.dfm_bm_ml.fast.fit_fast, but uses
-the Numba-accelerated EM step in em_fast_numba.
-"""
-
-import warnings
 import numpy as np
 from tqdm.auto import tqdm
 
-from ..spec import BMDfmConfig, BMDfmResult
-from ..scaling import scale_panel
-from .init_fast import pca_init_factors
-from ..constraints import mm_sum_sq
-from ..state_builder import BMParams, build_state_space
-from ..stability import enforce_var_stability
-from .em_fast_numba import em_step_ml_fast_numba, build_em_cache, EMStepCache
+from dfm_pipeline.dfm_bm_ml.fast.em_step_cache import EMStepCache
+from dfm_pipeline.dfm_bm_ml.fast.init import init_params_pca
+from dfm_pipeline.dfm_bm_ml.fast.m_step_numba import m_step_numba
+from dfm_pipeline.dfm_bm_ml.fast.state_space import build_state_space
+from dfm_pipeline.dfm_bm_ml.scaling import scale_panel
+from dfm_pipeline.dfm_bm_ml.spec import BMDfmConfig
+from dfm_pipeline.dfm_bm_ml.types import BMDfmResult, BMParams
 
 
-def _fit_var_ols(F: np.ndarray, p: int) -> tuple[list[np.ndarray], np.ndarray]:
-    Tn, r = F.shape
-    if p == 0:
-        return [], np.eye(r, dtype=float) * 0.1
-
-    X_lags = []
-    for lag in range(1, p + 1):
-        X_lags.append(F[p - lag:Tn - lag, :])
-    Z = np.concatenate(X_lags, axis=1)
-    Y = F[p:, :]
-
-    B = np.linalg.lstsq(Z, Y, rcond=None)[0].T
-    Phi = [B[:, lag * r:(lag + 1) * r] for lag in range(p)]
-
-    resid = Y - Z @ B.T
-    Q_f = np.cov(resid.T, bias=True)
-    return Phi, Q_f
+def _convergence_stat(
+    config: BMDfmConfig, ll_new: float, ll_old: float, ll0: float | None
+) -> tuple[float, float, float]:
+    dLL = float(ll_new - ll_old)
+    rel = float(abs(dLL) / (abs(ll_old) + 1.0))
+    if config.convergence_mode == "absolute_ll":
+        crit = abs(dLL)
+    elif config.convergence_mode == "toolbox_rel":
+        crit = rel
+    else:
+        raise ValueError(f"Unknown convergence_mode={config.convergence_mode!r}")
+    return dLL, rel, crit
 
 
 def fit_bm_dfm_fast_numba(
-    Y_monthly: np.ndarray,
+    X_monthly: np.ndarray,
     y_quarterly: np.ndarray,
     config: BMDfmConfig,
-    *,
     init_params: BMParams | None = None,
     em_cache: EMStepCache | None = None,
 ) -> BMDfmResult:
-    # Validate invariants early so mistakes fail loudly.
     config.validate()
 
     if int(config.n_quarterly) != 1:
         raise ValueError("This implementation supports n_quarterly=1 (single quarterly target).")
 
-    if int(config.p) > 5:
-        warnings.warn("Toolbox caps p at 5; using p=5.", RuntimeWarning)
-        p = 5
-    else:
-        p = int(config.p)
+    T = X_monthly.shape[0]
+    nM = X_monthly.shape[1]
+    nQ = int(config.n_quarterly)
 
-    ppC = 5
-    _, nM = Y_monthly.shape
-    nQ = 1
+    Y_raw = np.column_stack([X_monthly, y_quarterly.reshape(T, nQ)])
 
-    Y_raw = np.column_stack([Y_monthly, y_quarterly.reshape(-1, 1)]).astype(float)
-    Y_scaled, scaler = scale_panel(Y_raw, mode=str(config.scaling_mode))
+    Y, scaler = scale_panel(Y_raw, mode=str(config.scaling_mode), min_std=float(config.min_var))
 
-    r_by_block = tuple(int(x) for x in config.r_by_block)
-    r_total = int(sum(r_by_block))
-    if r_total <= 0:
-        raise ValueError("sum(r_by_block) must be positive.")
+    Xs = Y[:, :nM]
+    yq = Y[:, nM : nM + nQ]
 
     if init_params is None:
-        F0, Lambda0 = pca_init_factors(Y_scaled[:, :nM], r_total, fill_mode=config.pca_fill)
-
-        Phi_blocks: list[list[np.ndarray]] = []
-        Q_f_blocks: list[np.ndarray] = []
-
-        cursor = 0
-        for rb in r_by_block:
-            rb = int(rb)
-            Fb = F0[:, cursor:cursor + rb]
-            Phi_b, Q_b = _fit_var_ols(Fb, p=p)
-            if bool(config.force_var_stability) and p > 0 and rb > 0:
-                Phi_b = enforce_var_stability(Phi_b, ppC=int(ppC), shrink=float(config.var_stability_shrink))
-            Phi_blocks.append([x.copy() for x in Phi_b])
-            Q_f_blocks.append(Q_b.copy())
-            cursor += rb
-
-        rho_m = np.full((nM,), float(config.rho_idio_init), dtype=float)
-        sig2_m = np.full((nM,), 1.0, dtype=float)
-        rho_q = np.full((nQ,), float(config.rho_idio_init), dtype=float)
-        sig2_q = np.full((nQ,), 1.0, dtype=float)
-
-        Lambda_m = Lambda0.copy().astype(float)
-        Lambda_q = np.zeros((nQ, r_total), dtype=float)
-
-        obs_q = ~np.isnan(Y_scaled[:, nM])
-        if np.any(obs_q):
-            Lambda_q[0, :] = np.linalg.lstsq(F0[obs_q, :], Y_scaled[obs_q, nM], rcond=None)[0]
-
-        if bool(config.idio_ar1):
-            R_diag_m = np.full((nM,), float(config.monthly_meas_var_floor), dtype=float)
-        else:
-            R_diag_m = np.full((nM,), 0.5, dtype=float)
-        R_diag_q = np.full((nQ,), float(config.quarterly_meas_var_floor), dtype=float)
-
-        if np.any(obs_q):
-            yq = Y_scaled[obs_q, nM]
-            yq_hat = (F0[obs_q, :] @ Lambda_q[0, :].reshape(-1, 1)).reshape(-1)
-            resid = yq - yq_hat
-            var_q = float(np.nanvar(resid, ddof=0))
-            denom = mm_sum_sq(config.mm_weight_style)
-            sig2_q[0] = max(var_q / denom, float(config.min_var))
-            if bool(config.fix_quarterly_R):
-                R_diag_q[0] = float(config.quarterly_meas_var_floor)
-
-        params = BMParams(
-            Phi_blocks=Phi_blocks,
-            Q_f_blocks=Q_f_blocks,
-            rho_m=rho_m,
-            sig2_m=sig2_m,
-            rho_q=rho_q,
-            sig2_q=sig2_q,
-            Lambda_m=Lambda_m,
-            Lambda_q=Lambda_q,
-            R_diag_m=R_diag_m,
-            R_diag_q=R_diag_q,
-        )
+        params = init_params_pca(Xs, yq, config=config)
     else:
         params = init_params
 
-    if em_cache is None:
-        em_cache = build_em_cache(
-            nM=nM,
-            nQ=nQ,
-            r_by_block=r_by_block,
-            blocks=config.blocks,
-            enforce_q_loading_constraint=bool(config.enforce_quarterly_loading_constraint),
-        )
+    ss = build_state_space(params=params, config=config)
 
     loglik_trace: list[float] = []
-    a_last: np.ndarray | None = None
-    P_last: np.ndarray | None = None
-    P_lag_last: np.ndarray | None = None
 
-    a0_in: np.ndarray | None = None
-    P0_in: np.ndarray | None = None
-
-    pbar = tqdm(range(int(config.max_iter)), desc="BM-DFM EM (fast numba)", unit="iter", leave=True)
+    pbar = tqdm(range(int(config.max_iter)), desc="BM-DFM EM (fast+numba)", leave=False)
+    ll0: float | None = None
+    converged = False
     for it in pbar:
-        params, ll, a_last, P_last, P_lag_last, a0_in, P0_in = em_step_ml_fast_numba(
-            Y=Y_scaled,
+        new_params, ll, em_cache = m_step_numba(
+            Y=Y,
             params=params,
-            nM=nM,
-            nQ=nQ,
-            r_by_block=r_by_block,
-            p=p,
-            ppC=ppC,
-            mm_style=str(config.mm_weight_style),
-            quarterly_meas_var_floor=float(config.quarterly_meas_var_floor),
-            monthly_meas_var_floor=float(config.monthly_meas_var_floor),
-            idio_ar1=bool(config.idio_ar1),
-            force_var_stability=bool(config.force_var_stability),
-            var_stability_shrink=float(config.var_stability_shrink),
-            P0_mode=str(config.P0_mode),
-            a0_in=a0_in,
-            P0_in=P0_in,
-            update_initial_state=bool(config.update_initial_state_each_iter),
-            min_var=float(config.min_var),
-            jitter=float(config.jitter),
-            enforce_q_loading_constraint=bool(config.enforce_quarterly_loading_constraint),
-            fix_quarterly_R=bool(config.fix_quarterly_R),
-            blocks=config.blocks,
-            cache=em_cache,
+            ss=ss,
+            config=config,
+            em_cache=em_cache,
         )
         loglik_trace.append(float(ll))
+        if ll0 is None:
+            ll0 = float(ll)
 
-        if it == 0:
+        params = new_params
+        ss = build_state_space(params=params, config=config)
+
+        if len(loglik_trace) == 1:
             pbar.set_postfix_str(f"loglik={ll:.2f}")
             continue
 
-        ll_prev = float(loglik_trace[-2])
-        ll_cur = float(loglik_trace[-1])
-        delta = ll_cur - ll_prev
-
-        if config.convergence_mode == "abs":
-            crit = abs(delta)
-        else:
-            denom = 0.5 * (abs(ll_cur) + abs(ll_prev))
-            denom = denom if denom > 0.0 else 1.0
-            crit = abs(delta) / denom
-
-        if config.convergence_mode == "abs":
-            pbar.set_postfix_str(f"loglik={ll_cur:.2f}, dLL={delta:.3e}")
-        else:
-            pbar.set_postfix_str(f"loglik={ll_cur:.2f}, dLL={delta:.3e}, rel={crit:.3e}")
+        dLL, rel, crit = _convergence_stat(config, loglik_trace[-1], loglik_trace[-2], ll0)
+        pbar.set_postfix_str(f"loglik={ll:.2f}, dLL={dLL:.3e}, rel={rel:.3e}")
 
         if it >= 2 and crit < float(config.tol):
-            pbar.set_postfix_str(f"loglik={ll_cur:.2f}, converged")
+            converged = True
             break
 
-    if a_last is None or P_last is None or P_lag_last is None:
-        raise RuntimeError("EM did not produce smoother outputs.")
-
-    Tm, Qm, Cm, Rm, a0, P0, idx = build_state_space(
-        params=params,
-        nM=nM,
-        nQ=nQ,
-        r_by_block=r_by_block,
-        p=p,
-        ppC=ppC,
-        mm_style=str(config.mm_weight_style),
-        quarterly_meas_var_floor=float(config.quarterly_meas_var_floor),
-        idio_ar1=bool(config.idio_ar1),
-        jitter=float(config.jitter),
-        P0_mode=str(config.P0_mode),
-        a0_override=a0_in,
-        P0_override=P0_in,
-    )
+    ss = build_state_space(params=params, config=config)
 
     return BMDfmResult(
-        config=config,
+        params=params,
+        state_space=ss,
         loglik_trace=loglik_trace,
         scaler=scaler,
-        T=Tm,
-        Q=Qm,
-        C=Cm,
-        R=Rm,
-        a0=a0,
-        P0=P0,
-        a_smooth=a_last,
-        P_smooth=P_last,
-        P_lag_smooth=P_lag_last,
-        idx_factors=idx.idx_factors,
-        idx_idio_monthly=idx.idx_idio_monthly,
-        idx_idio_quarterly=idx.idx_idio_quarterly,
-        f_t_idx=idx.f_t_idx,
-        f_stack_idx=idx.f_stack_idx,
-        params_final=params,
+        em_cache=em_cache,
+        converged=bool(converged),
+        config=replace(config),
     )
