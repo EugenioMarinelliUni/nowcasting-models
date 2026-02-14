@@ -1,3 +1,4 @@
+# scripts/preprocessing/run_standardize_full_panel_on_window.py
 #!/usr/bin/env python3
 from __future__ import annotations
 
@@ -137,7 +138,12 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument(
         "--date-col",
         default="sasdate",
-        help="Date column name in CSV (default: sasdate).",
+        help="Date column name in input CSV (default: sasdate).",
+    )
+    ap.add_argument(
+        "--date-col-out",
+        default="date",
+        help="Date column name in output CSVs (default: date). Use 'sasdate' to match your dataset convention.",
     )
     ap.add_argument(
         "--train-start",
@@ -229,6 +235,9 @@ def parse_args() -> argparse.Namespace:
     if not args.out_dir:
         if not args.out_full:
             raise SystemExit("Either --out-dir (recommended) or --out-full must be provided.")
+
+    if not args.date_col_out:
+        raise SystemExit("--date-col-out must be a non-empty string.")
     return args
 
 
@@ -253,7 +262,7 @@ def main() -> None:
 
     # 3) Write full standardized panel
     df_full = Z_full.copy()
-    df_full.insert(0, "date", df_full.index)
+    df_full.insert(0, args.date_col_out, df_full.index)
 
     _ensure_parent(plan.out_full)
     df_full.to_csv(plan.out_full, index=False)
@@ -267,7 +276,7 @@ def main() -> None:
     if plan.out_train is not None:
         Z_train = Z_full.loc[train_slice].copy()
         df_train = Z_train.copy()
-        df_train.insert(0, "date", df_train.index)
+        df_train.insert(0, args.date_col_out, df_train.index)
         _ensure_parent(plan.out_train)
         df_train.to_csv(plan.out_train, index=False)
         print(f"[OK] wrote standardized training panel: {plan.out_train}  shape={df_train.shape}")
@@ -275,7 +284,7 @@ def main() -> None:
     if plan.out_oos is not None:
         Z_oos = Z_full.loc[oos_slice].copy()
         df_oos = Z_oos.copy()
-        df_oos.insert(0, "date", df_oos.index)
+        df_oos.insert(0, args.date_col_out, df_oos.index)
         _ensure_parent(plan.out_oos)
         df_oos.to_csv(plan.out_oos, index=False)
         print(f"[OK] wrote standardized OOS panel: {plan.out_oos}  shape={df_oos.shape}")
