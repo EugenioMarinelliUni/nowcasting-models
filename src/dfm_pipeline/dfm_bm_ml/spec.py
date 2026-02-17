@@ -53,6 +53,7 @@ class BMDfmConfig:
     # VAR stability
     force_var_stability: bool = True
     var_stability_shrink: float = 0.98
+    var_stability_max_iter: int = 50
 
     def validate(self) -> None:
         # Core dimensional assumptions for this BM-DFM variant

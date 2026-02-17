@@ -145,6 +145,7 @@ def init_params_pca(
         if config.force_var_stability and config.p > 0:
             Phi_lags = enforce_var_stability(
                 Phi_lags,
+                ppC=5,
                 shrink=config.var_stability_shrink,
                 max_iter=config.var_stability_max_iter,
             )
@@ -182,9 +183,11 @@ def init_params_pca(
     sig2_m0 = np.maximum(sig2_m0, config.min_var)
 
     # Quarterly idio (shift register) init; toolbox uses /sum(w^2)=/19 scaling
-    rho_q0 = 0.0
-    sig2_q0 = 1.0 / float(mm_sum_sq(config.mm_weight_style))
-    sig2_q0 = max(sig2_q0, config.min_var)
+    nQ = int(config.n_quarterly)
+    rho_q0 = np.zeros(nQ, dtype=float)
+    sig2_q0_scalar = 1.0 / float(mm_sum_sq(config.mm_weight_style))
+    sig2_q0_scalar = max(sig2_q0_scalar, config.min_var)
+    sig2_q0 = np.full(nQ, sig2_q0_scalar, dtype=float)
 
     return BMParams(
         Phi_blocks=Phi_blocks,
@@ -196,5 +199,5 @@ def init_params_pca(
         Lambda_m=Lambda_m0,
         Lambda_q=Lambda_q0,
         R_diag_m=R_m0,
-        R_diag_q=R_q0,
+        R_diag_q=np.asarray([R_q0], dtype=float),
     )
