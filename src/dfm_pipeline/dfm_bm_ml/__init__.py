@@ -1,11 +1,15 @@
-"""Bańbura–Modugno (2014) mixed-frequency DFM (ML-EM)."""
+from __future__ import annotations
 
-from .spec import BMDfmConfig, BMDfmResult
+from .spec import BMDfmConfig
 
-# Stable public entrypoint (wrapper over the maintained fast implementation)
+try:
+    # Newer layout: result/typing artifacts live in types.py
+    from .types import BMDfmResult  # type: ignore
+except Exception:  # pragma: no cover
+    # Backward compatible: BMDfmResult lives in spec.py
+    from .spec import BMDfmResult  # type: ignore
+
 from .fit import fit_bm_dfm
-
-# Explicit access to the fast implementations
 from .fast.fit_fast import fit_bm_dfm_fast
 from .fast.fit_fast_numba import fit_bm_dfm_fast_numba
 
