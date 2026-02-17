@@ -1,172 +1,174 @@
+"""Build Bańbura–Modugno (BM) model inputs.
+
+Produces two consistent variants:
+
+1) Frozen scaling (fixed window):
+   - Standardize using mean/std computed on a chosen window.
+   - Run DFM with scaling_mode=external_frozen.
+
+2) Toolbox-vintage / per-vintage rescaling:
+   - Save raw (tcode-transformed but unstandardized) inputs.
+   - Run DFM with scaling_mode=toolbox_vintage so scaling is recomputed per fit call.
+
+Target mapping convention:
+- Quarterly target is mapped to a monthly index by placing the quarterly value
+  on the quarter-end month (Mar/Jun/Sep/Dec). If your quarterly series is dated
+  at quarter-start (e.g., 1960-04-01), it is correctly placed at 1960-06-01.
+"""
+
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+import json
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 
-from dfm_pipeline.preprocessing.fixed_window_standardize import standardize_full_panel_on_window
+from dfm_pipeline.preprocessing.fixed_window_standardize import (
+    standardize_panel_on_window,
+)
 from dfm_pipeline.preprocessing.target_standardize import (
-    TargetStdStats,
-    make_monthly_target,
     read_quarterly_target,
-    standardize_monthly_target_on_window,
+    quarterly_to_monthly,
+    standardize_target_on_window,
 )
 
 
 @dataclass(frozen=True)
-class BMInputPaths:
-    x_raw_csv: str
-    y_raw_monthly_csv: str
-    x_z_csv: str
-    y_z_monthly_csv: str
-    scalers_json: str
+class BMInputsPaths:
+    X_raw: Path
+    y_raw_monthly: Path
+    X_frozen_z: Path
+    y_frozen_z_monthly: Path
+    frozen_panel_scaler_json: Path
+    frozen_target_scaler_json: Path
 
 
-def _ensure_month_start_index(idx: pd.DatetimeIndex) -> pd.DatetimeIndex:
-    # Robustly coerce any date-like index to MS (month start).
-    # This avoids subtle “month end vs month start” mismatches.
-    return pd.DatetimeIndex(idx).to_period("M").to_timestamp("MS")
+def _infer_value_col(df: pd.DataFrame, date_col: str) -> str:
+    cols = [c for c in df.columns if c != date_col]
+    if "value" in cols:
+        return "value"
+    if "y" in cols and len(cols) == 1:
+        return "y"
+    if len(cols) == 1:
+        return cols[0]
+    raise ValueError(
+        f"Target CSV has multiple candidate value columns {cols}. "
+        f"Provide a single value column or rename one to 'value'."
+    )
 
 
-def _read_panel(panel_csv: str, date_col: str) -> pd.DataFrame:
-    df = pd.read_csv(panel_csv, parse_dates=[date_col])
-    df = df.set_index(date_col).sort_index()
-    df.index = _ensure_month_start_index(df.index)
-
-    # Keep only numeric columns; coerce to float.
-    df = df.apply(pd.to_numeric, errors="coerce").astype(float)
-    return df
+def _read_panel(panel_csv: str | Path, date_col: str) -> pd.DataFrame:
+    df = pd.read_csv(panel_csv, parse_dates=[date_col]).set_index(date_col).sort_index()
+    # ensure float and keep NaNs
+    return df.apply(pd.to_numeric, errors="coerce")
 
 
-def _write_with_date_col(df: pd.DataFrame | pd.Series, out_csv: str, date_col_out: str) -> None:
-    out_path = Path(out_csv)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+def _build_monthly_target_for_panel(
+    panel_index: pd.DatetimeIndex,
+    quarterly_target_csv: str | Path,
+    date_col: str,
+    value_col: Optional[str] = None,
+    place: str = "end",
+) -> pd.Series:
+    # We need to read the raw file once to infer the value column if not specified.
+    raw = pd.read_csv(quarterly_target_csv)
+    if value_col is None:
+        value_col = _infer_value_col(raw, date_col=date_col)
 
-    if isinstance(df, pd.Series):
-        out_df = df.to_frame()
-    else:
-        out_df = df
+    yq = read_quarterly_target(
+        quarterly_target_csv,
+        date_col=date_col,
+        value_col=value_col,
+    )
+    ym = quarterly_to_monthly(yq, place=place, monthly_freq="MS")
 
-    out_df = out_df.copy()
-    out_df.index = _ensure_month_start_index(pd.DatetimeIndex(out_df.index))
-    out_df.insert(0, date_col_out, out_df.index)
-    out_df.to_csv(out_path, index=False)
+    y_monthly = pd.Series(np.nan, index=panel_index, name="y", dtype=float)
+    common = panel_index.intersection(ym.index)
+    y_monthly.loc[common] = ym.loc[common].astype(float).values
+    return y_monthly
 
 
 def build_bm_inputs_from_raw(
-    *,
-    panel_csv: str,
-    quarterly_target_csv: str,
-    date_col_panel: str,
-    date_col_target: str,
-    target_col: str,
-    outdir: str,
-    train_start: str,
-    train_end: str,
-    date_col_out: str = "sasdate",
-    target_anchor: str = "quarter_end_month",
-) -> BMInputPaths:
-    """
-    Builds BOTH configurations you want:
+    panel_csv: str | Path,
+    quarterly_target_csv: str | Path,
+    outdir: str | Path,
+    cfg: Dict[str, Any],
+    window: Tuple[str, str] = ("1960-01-01", "2015-12-01"),
+    date_col_override: Optional[str] = None,
+    emit_raw: bool = True,
+    emit_frozen: bool = True,
+) -> BMInputsPaths:
+    outdir = Path(outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
 
-    1) Raw BM inputs (unstandardized):
-       - X_panel__bm_raw.csv
-       - y_target__bm_monthly.csv   (quarterly values placed on quarter-end month; other months NaN)
+    date_col = date_col_override or cfg.get("dates", {}).get("date_col", "sasdate")
 
-    2) Frozen-scaler BM inputs (standardized on [train_start, train_end]):
-       - X_panel_z__bm.csv
-       - y_target_z__bm_monthly.csv
+    X_raw_df = _read_panel(panel_csv, date_col=date_col)
 
-    Notes
-    - Panel is assumed to be already transformed (tcodes etc) but not standardized.
-    - The target is assumed to be QUARTERLY in quarterly_target_csv.
-    - Output indices are forced to Month-Start (MS) to match your BM-DFM machinery.
-    """
-    outdir = str(Path(outdir))
-    outdir_p = Path(outdir)
-    outdir_p.mkdir(parents=True, exist_ok=True)
+    # Build monthly target (quarter-end placement)
+    target_anchor = cfg.get("labeling", {}).get("target_anchor", "quarter_end_month")
+    place = "end" if target_anchor in ("quarter_end_month", "end", "quarter_end") else "end"
 
-    # 1) Read panel (raw transformed)
-    X_raw = _read_panel(panel_csv, date_col_panel)
-
-    # 2) Read quarterly target and map to monthly (BM convention: GDP on quarter-end month)
-    y_q = read_quarterly_target(
-        quarterly_target_csv,
-        target_col=target_col,
-        date_col=date_col_target,
-    )
-    y_m = make_monthly_target(y_q, anchor=target_anchor)
-    y_m.index = _ensure_month_start_index(pd.DatetimeIndex(y_m.index))
-
-    # 3) Align to common monthly index (intersection)
-    idx = X_raw.index.intersection(y_m.index)
-    X_raw = X_raw.loc[idx]
-    y_m = y_m.loc[idx]
-
-    # 4) Write raw BM inputs
-    x_raw_out = str(outdir_p / "X_panel__bm_raw.csv")
-    y_raw_out = str(outdir_p / "y_target__bm_monthly.csv")
-    _write_with_date_col(X_raw, x_raw_out, date_col_out)
-    _write_with_date_col(y_m.rename("y"), y_raw_out, date_col_out)
-
-    # 5) Frozen-window standardization for X (reuse existing implementation)
-    X_z, x_stats = standardize_full_panel_on_window(
-        panel_csv=panel_csv,
-        train_start=train_start,
-        train_end=train_end,
-        date_col=date_col_panel,
-    )
-    X_z.index = _ensure_month_start_index(pd.DatetimeIndex(X_z.index))
-    X_z = X_z.loc[idx]  # enforce same aligned index used for BM y_m
-
-    # 6) Frozen-window standardization for monthly BM y
-    y_z, y_stats = standardize_monthly_target_on_window(
-        y_m.rename("y"),
-        train_start=train_start,
-        train_end=train_end,
+    y_raw_monthly = _build_monthly_target_for_panel(
+        panel_index=X_raw_df.index,
+        quarterly_target_csv=quarterly_target_csv,
+        date_col=date_col,
+        value_col=None,
+        place=place,
     )
 
-    # 7) Write standardized BM inputs
-    x_z_out = str(outdir_p / "X_panel_z__bm.csv")
-    y_z_out = str(outdir_p / "y_target_z__bm_monthly.csv")
-    _write_with_date_col(X_z, x_z_out, date_col_out)
-    _write_with_date_col(y_z.rename("y"), y_z_out, date_col_out)
+    # Paths
+    X_raw_path = outdir / "X_panel__bm_raw.csv"
+    y_raw_path = outdir / "y_target__bm_monthly_raw.csv"
 
-    # 8) Persist scalers for traceability
-    scalers = {
-        "panel": {
-            "train_start": train_start,
-            "train_end": train_end,
-            "date_col_panel": date_col_panel,
-            "mean": x_stats.mean.to_dict(),
-            "std": x_stats.std.to_dict(),
-        },
-        "target_monthly_bm": {
-            "train_start": train_start,
-            "train_end": train_end,
-            "anchor": target_anchor,
-            "mean": float(y_stats.mean),
-            "std": float(y_stats.std),
-        },
-        "meta": {
-            "panel_csv": panel_csv,
-            "quarterly_target_csv": quarterly_target_csv,
-            "target_col": target_col,
-            "date_col_target": date_col_target,
-            "date_col_out": date_col_out,
-        },
-    }
+    X_z_path = outdir / "X_panel_z__bm.csv"
+    y_z_path = outdir / "y_target_z__bm_monthly.csv"
 
-    scalers_out = str(outdir_p / "bm_scalers.json")
-    Path(scalers_out).write_text(pd.Series(scalers).to_json(), encoding="utf-8")
+    panel_scaler_path = outdir / "scaler_panel_frozen.json"
+    target_scaler_path = outdir / "scaler_target_frozen.json"
 
-    return BMInputPaths(
-        x_raw_csv=x_raw_out,
-        y_raw_monthly_csv=y_raw_out,
-        x_z_csv=x_z_out,
-        y_z_monthly_csv=y_z_out,
-        scalers_json=scalers_out,
+    # 1) Raw artifacts (toolbox-vintage mode inputs)
+    if emit_raw:
+        X_raw_df.to_csv(X_raw_path, index=True)
+        y_raw_monthly.to_frame("y").to_csv(y_raw_path, index=True)
+
+    # 2) Frozen standardized artifacts (external_frozen mode inputs)
+    if emit_frozen:
+        start, end = window
+        X_z, panel_stats = standardize_panel_on_window(
+            X_raw_df, window_start=start, window_end=end
+        )
+
+        y_z, target_stats = standardize_target_on_window(
+            y_raw_monthly, window_start=start, window_end=end
+        )
+
+        X_z.to_csv(X_z_path, index=True)
+        y_z.to_frame("y").to_csv(y_z_path, index=True)
+
+        panel_payload = {
+            "window_start": start,
+            "window_end": end,
+            "mean": panel_stats["mean"].to_dict(),
+            "std": panel_stats["std"].to_dict(),
+        }
+        target_payload = {
+            "window_start": start,
+            "window_end": end,
+            "mean": float(target_stats["mean"]),
+            "std": float(target_stats["std"]),
+        }
+        panel_scaler_path.write_text(json.dumps(panel_payload, indent=2))
+        target_scaler_path.write_text(json.dumps(target_payload, indent=2))
+
+    return BMInputsPaths(
+        X_raw=X_raw_path,
+        y_raw_monthly=y_raw_path,
+        X_frozen_z=X_z_path,
+        y_frozen_z_monthly=y_z_path,
+        frozen_panel_scaler_json=panel_scaler_path,
+        frozen_target_scaler_json=target_scaler_path,
     )
