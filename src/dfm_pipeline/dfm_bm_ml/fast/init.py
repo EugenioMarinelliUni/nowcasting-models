@@ -8,8 +8,9 @@ from ..constraints import mm_sum_sq
 from ..spec import BMDfmConfig
 from ..stability import enforce_var_stability
 from ..state_builder import BMParams
+from ..toolbox_nanfill import dfm_remnans_spline_method2
 
-PcaFill = Literal["mean", "ffill"]
+PcaFill = Literal["mean", "ffill", "toolbox_spline"]
 
 
 def _fill_for_pca(Y: np.ndarray, method: PcaFill) -> np.ndarray:
@@ -18,6 +19,8 @@ def _fill_for_pca(Y: np.ndarray, method: PcaFill) -> np.ndarray:
 
     - mean: replace NaNs with column nan-mean (NaN-mean -> 0 if column all-NaN)
     - ffill: forward-fill within each column, then fill remaining NaNs with column nan-mean
+    - toolbox_spline: toolbox-style spline fill + trimming is handled in init_params_pca
+      (this function is not used for toolbox_spline).
     """
     Y = np.asarray(Y, dtype=float)
     X = Y.copy()
@@ -31,7 +34,6 @@ def _fill_for_pca(Y: np.ndarray, method: PcaFill) -> np.ndarray:
         return X
 
     if method == "ffill":
-        # forward fill along time axis
         T, n = X.shape
         last = np.full(n, np.nan, dtype=float)
         for t in range(T):
@@ -40,7 +42,6 @@ def _fill_for_pca(Y: np.ndarray, method: PcaFill) -> np.ndarray:
             last[mask] = row[mask]
             X[t, ~mask] = last[~mask]
 
-        # remaining NaNs -> column means
         inds = np.where(np.isnan(X))
         X[inds] = col_means[inds[1]]
         return X
@@ -48,7 +49,9 @@ def _fill_for_pca(Y: np.ndarray, method: PcaFill) -> np.ndarray:
     raise ValueError(f"Unsupported pca_fill={method!r}")
 
 
-def pca_init_factors(Y_monthly: np.ndarray, r_total: int, fill: PcaFill) -> Tuple[np.ndarray, np.ndarray]:
+def pca_init_factors(
+    Y_monthly: np.ndarray, r_total: int, fill: Literal["mean", "ffill"]
+) -> Tuple[np.ndarray, np.ndarray]:
     """
     PCA init on filled monthly panel.
 
@@ -79,24 +82,20 @@ def _fit_var_ols(F: np.ndarray, p: int) -> Tuple[list[np.ndarray], np.ndarray]:
     if p <= 0:
         return [], np.eye(r)
 
-    # Build lagged regressor matrix
-    Y = F[p:, :]  # (T-p, r)
+    Y = F[p:, :]
     X = []
     for lag in range(1, p + 1):
         X.append(F[p - lag : T - lag, :])
-    X = np.concatenate(X, axis=1)  # (T-p, r*p)
+    X = np.concatenate(X, axis=1)
 
-    # Solve Y = X B + e
-    B, *_ = np.linalg.lstsq(X, Y, rcond=None)  # (r*p, r)
+    B, *_ = np.linalg.lstsq(X, Y, rcond=None)
     resid = Y - X @ B
 
-    # Innovation covariance
     Q = np.cov(resid.T, bias=True)
     if Q.ndim == 0:
         Q = np.array([[float(Q)]], dtype=float)
     Q = (Q + Q.T) / 2.0
 
-    # Split B into lag matrices (each r x r)
     Phi_lags = []
     for lag in range(p):
         Phi_lags.append(B[lag * r : (lag + 1) * r, :].T)
@@ -112,6 +111,11 @@ def init_params_pca(
     """
     Build a full BMParams initialization from PCA (and simple OLS for the factor VAR and quarterly loading).
     Expects Y_scaled to be (T, nM + 1), with quarterly target in the last column (NaNs except quarter-ends).
+
+    If config.pca_fill == "toolbox_spline", we mimic toolbox initialization:
+      - DFM_remNaNs_spline method 2 with k=3 on the full X=[monthly, quarterly] matrix
+      - run PCA on the filled monthly block of the balanced sample
+      - use NaN pattern from the balanced sample when deciding which quarterly observations exist
     """
     Y_scaled = np.asarray(Y_scaled, dtype=float)
     if Y_scaled.ndim != 2:
@@ -124,11 +128,37 @@ def init_params_pca(
     if r_total <= 0:
         raise ValueError("sum(r_by_block) must be > 0.")
 
-    Y_m = Y_scaled[:, :nM]
-    y_q = Y_scaled[:, nM]
+    # Toolbox convention: ppC = max(p, 5)
+    ppC = max(int(config.p), 5)
 
-    # PCA on monthly panel
-    F0, Lambda_m0 = pca_init_factors(Y_m, r_total=r_total, fill=config.pca_fill)
+    # Quarterly count (this implementation typically uses nQ=1, but state_builder expects vectors)
+    nQ = int(getattr(config, "n_quarterly", 1))
+
+    # Toolbox spline+trim path (balanced sample)
+    if getattr(config, "pca_fill", "mean") == "toolbox_spline":
+        k = int(getattr(config, "pca_spline_k", 3))
+        frac = float(getattr(config, "pca_spline_trim_row_missing_frac", 0.8))
+
+        fill_res = dfm_remnans_spline_method2(Y_scaled, k=k, row_missing_frac=frac)
+        X_bal_filled = fill_res.X_bal_filled
+        indNaN_bal = fill_res.indNaN_bal
+
+        # Create NaN-pattern version (like toolbox xNaN = xBal; xNaN(indNaN)=nan)
+        X_bal_nan = X_bal_filled.copy()
+        X_bal_nan[indNaN_bal] = np.nan
+
+        Y_m_filled = X_bal_filled[:, :nM]
+        y_q_nan = X_bal_nan[:, nM]
+        Y_m_nan = X_bal_nan[:, :nM]
+
+        # PCA on filled monthly panel (balanced sample)
+        F0, Lambda_m0 = pca_init_factors(Y_m_filled, r_total=r_total, fill="mean")
+
+    else:
+        # Existing mean/ffill path on the original sample
+        Y_m_nan = Y_scaled[:, :nM]
+        y_q_nan = Y_scaled[:, nM]
+        F0, Lambda_m0 = pca_init_factors(Y_m_nan, r_total=r_total, fill=config.pca_fill)  # type: ignore
 
     # Block split
     blocks = []
@@ -145,18 +175,18 @@ def init_params_pca(
         if config.force_var_stability and config.p > 0:
             Phi_lags = enforce_var_stability(
                 Phi_lags,
-                ppC=5,
+                ppC=ppC,  # toolbox rule: max(p,5)
                 shrink=config.var_stability_shrink,
-                max_iter=config.var_stability_max_iter,
+                max_iter=getattr(config, "var_stability_max_iter", 50),
             )
         Phi_blocks.append(Phi_lags)
         Q_f_blocks.append(Qb)
 
-    # Quarterly loading (simple regression on contemporaneous factors at observed quarter-ends)
-    obs_q = np.isfinite(y_q)
+    # Quarterly loading regression on contemporaneous factors at observed months
+    obs_q = np.isfinite(y_q_nan)
     if obs_q.sum() >= r_total:
         Xq = F0[obs_q, :]
-        yq = y_q[obs_q]
+        yq = y_q_nan[obs_q]
         beta, *_ = np.linalg.lstsq(Xq, yq, rcond=None)
         Lambda_q0 = beta.reshape(1, -1)
         yq_hat = Xq @ beta
@@ -166,28 +196,31 @@ def init_params_pca(
         Lambda_q0[0, 0] = 1.0
         R_q0 = 1.0
 
-    R_q0 = max(R_q0, config.quarterly_meas_var_floor)
+    # Quarterly measurement variance (vector, length nQ)
+    R_q0 = max(R_q0, float(config.quarterly_meas_var_floor))
+    R_diag_q0 = np.full(nQ, float(R_q0), dtype=float)
 
-    # Monthly measurement variance: if idio states are in the state, pin R_m near floor (toolbox-style)
+    # Monthly measurement variance
     if config.idio_ar1:
-        R_m0 = np.full(nM, config.monthly_meas_var_floor, dtype=float)
+        R_m0 = np.full(nM, float(config.monthly_meas_var_floor), dtype=float)
     else:
-        resid_m = Y_m - (F0 @ Lambda_m0.T)
+        resid_m = Y_m_nan - (F0 @ Lambda_m0.T)
         R_m0 = np.nanvar(resid_m, axis=0)
-        R_m0 = np.where(np.isfinite(R_m0), R_m0, config.monthly_meas_var_floor)
-        R_m0 = np.maximum(R_m0, config.monthly_meas_var_floor)
+        R_m0 = np.where(np.isfinite(R_m0), R_m0, float(config.monthly_meas_var_floor))
+        R_m0 = np.maximum(R_m0, float(config.monthly_meas_var_floor))
 
     # Idiosyncratic AR(1) init (monthly)
     rho_m0 = np.full(nM, float(config.rho_idio_init), dtype=float)
     sig2_m0 = np.full(nM, 1.0 - float(config.rho_idio_init) ** 2, dtype=float)
-    sig2_m0 = np.maximum(sig2_m0, config.min_var)
+    sig2_m0 = np.maximum(sig2_m0, float(config.min_var))
 
-    # Quarterly idio (shift register) init; toolbox uses /sum(w^2)=/19 scaling
-    nQ = int(config.n_quarterly)
+    # Quarterly idiosyncratic init (vectors, length nQ)
     rho_q0 = np.zeros(nQ, dtype=float)
-    sig2_q0_scalar = 1.0 / float(mm_sum_sq(config.mm_weight_style))
-    sig2_q0_scalar = max(sig2_q0_scalar, config.min_var)
-    sig2_q0 = np.full(nQ, sig2_q0_scalar, dtype=float)
+
+    # Quarterly idio innovation variance scaling (/sum(w^2)=/19 in toolbox style)
+    sig2_q_scalar = 1.0 / float(mm_sum_sq(config.mm_weight_style))
+    sig2_q_scalar = max(sig2_q_scalar, float(config.min_var))
+    sig2_q0 = np.full(nQ, float(sig2_q_scalar), dtype=float)
 
     return BMParams(
         Phi_blocks=Phi_blocks,
@@ -199,5 +232,5 @@ def init_params_pca(
         Lambda_m=Lambda_m0,
         Lambda_q=Lambda_q0,
         R_diag_m=R_m0,
-        R_diag_q=np.asarray([R_q0], dtype=float),
+        R_diag_q=R_diag_q0,
     )
