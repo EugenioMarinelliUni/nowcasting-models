@@ -1,10 +1,21 @@
 from __future__ import annotations
 
 from typing import Any, Optional
+import inspect
 
 import numpy as np
 
 from dfm_pipeline.dfm_bm_ml.types import BMDfmConfig, BMParams, BMDfmResult
+
+
+def _call_supported(fn, **kwargs):
+    """
+    Call fn with only the kwargs it supports (by signature).
+    Prevents 'unexpected keyword argument' errors across versions.
+    """
+    sig = inspect.signature(fn)
+    filt = {k: v for k, v in kwargs.items() if k in sig.parameters}
+    return fn(**filt)
 
 
 def fit_bm_dfm(
@@ -18,10 +29,10 @@ def fit_bm_dfm(
 ) -> BMDfmResult:
     """
     Public entrypoint (backward compatible).
-    Routes to fast implementation.
+    Routes to the fast implementation.
     """
     return fit_bm_dfm_fast(
-        Y_monthly=X_monthly,
+        X_monthly=X_monthly,
         y_quarterly=y_quarterly,
         config=config,
         init_params=init_params,
@@ -35,17 +46,18 @@ def fit_bm_dfm_fast(
     y_quarterly: Optional[np.ndarray] = None,
     config: Optional[BMDfmConfig] = None,
     *,
-    # alias for backward compatibility
-    X_monthly: Optional[np.ndarray] = None,
-    # warm start (support both names)
+    X_monthly: Optional[np.ndarray] = None,          # alias
     init_params: Optional[BMParams] = None,
-    params_init: Optional[BMParams] = None,
+    params_init: Optional[BMParams] = None,          # alias
     em_cache: Any = None,
     verbose: bool = False,
 ) -> BMDfmResult:
     """
     Fast BM-DFM fitter wrapper.
-    Accepts Y_monthly or X_monthly (alias). Warm-start via init_params/params_init.
+
+    Accepts:
+      - Y_monthly or X_monthly (alias)
+      - init_params or params_init (alias)
     """
     if Y_monthly is None:
         Y_monthly = X_monthly
@@ -61,8 +73,11 @@ def fit_bm_dfm_fast(
 
     from dfm_pipeline.dfm_bm_ml.fast.fit_fast import fit_bm_dfm_fast as _fit
 
-    return _fit(
+    # Pass both Y_monthly and X_monthly; callee will take what it supports.
+    return _call_supported(
+        _fit,
         Y_monthly=Y_monthly,
+        X_monthly=Y_monthly,
         y_quarterly=y_quarterly,
         config=config,
         init_params=init_params,
@@ -76,17 +91,18 @@ def fit_bm_dfm_fast_numba(
     y_quarterly: Optional[np.ndarray] = None,
     config: Optional[BMDfmConfig] = None,
     *,
-    # alias for backward compatibility
-    X_monthly: Optional[np.ndarray] = None,
-    # warm start (support both names)
+    X_monthly: Optional[np.ndarray] = None,          # alias
     init_params: Optional[BMParams] = None,
-    params_init: Optional[BMParams] = None,
+    params_init: Optional[BMParams] = None,          # alias
     em_cache: Any = None,
     verbose: bool = False,
 ) -> BMDfmResult:
     """
     Numba BM-DFM fitter wrapper.
-    Accepts Y_monthly or X_monthly (alias). Warm-start via init_params/params_init.
+
+    Accepts:
+      - Y_monthly or X_monthly (alias)
+      - init_params or params_init (alias)
     """
     if Y_monthly is None:
         Y_monthly = X_monthly
@@ -102,8 +118,10 @@ def fit_bm_dfm_fast_numba(
 
     from dfm_pipeline.dfm_bm_ml.fast.fit_fast_numba import fit_bm_dfm_fast_numba as _fit
 
-    return _fit(
+    return _call_supported(
+        _fit,
         Y_monthly=Y_monthly,
+        X_monthly=Y_monthly,
         y_quarterly=y_quarterly,
         config=config,
         init_params=init_params,
