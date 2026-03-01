@@ -1,6 +1,6 @@
 import numpy as np
 from dataclasses import dataclass
-from typing import Optional, List, Tuple, Dict, Any
+from typing import Optional, List, Tuple
 
 # SciPy Cholesky tools (faster than np.linalg.solve in this pattern)
 try:
@@ -121,7 +121,7 @@ def build_companion_transition(
     T = np.zeros((m, m))
     T[:r, : r * p] = np.hstack(Phi_list)
     for j in range(1, p):
-        T[j * r: (j + 1) * r, (j - 1) * r: j * r] = np.eye(r)
+        T[j * r : (j + 1) * r, (j - 1) * r : j * r] = np.eye(r)
 
     Q = np.zeros((m, m))
     Q[:r, :r] = Q_u
@@ -138,124 +138,148 @@ def build_dfm_state_space(
     init_var_scale: float = 1e4,
 ) -> StateSpaceParams:
     """Dynamic factor model in state-space form."""
-    # Transition
-    T, Q = build_companion_transition(Phi_list, Q_u)
-
-    n = Lambda.shape[0]
-    r = Lambda.shape[1]
+    n, r = Lambda.shape
     p = len(Phi_list)
-    m = r * p
 
-    # Observation matrix in companion state: maps to first r states
-    C = np.zeros((n, m))
-    C[:, :r] = Lambda
+    if p == 0:
+        T = np.zeros((r, r))
+        Q = Q_u.copy()
+        C = Lambda.copy()
+        m = r
+    else:
+        T, Q = build_companion_transition(Phi_list, Q_u)
+        m = T.shape[0]
+        C = np.zeros((n, m))
+        C[:, :r] = Lambda
 
     if a0 is None:
         a0 = np.zeros(m)
     if P0 is None:
-        P0 = init_var_scale * np.eye(m)
+        P0 = np.eye(m) * init_var_scale
 
     return StateSpaceParams(T=T, Q=Q, C=C, R=R, a0=a0, P0=P0)
 
 
-def kalman_filter_only(
-    Y: np.ndarray,
-    ss: StateSpaceParams,
-    *,
-    jitter: float = 1e-9,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]:
+def kalman_filter_only(Y: np.ndarray, ss: StateSpaceParams):
     """
-    Kalman filter with missing data (NaNs) only.
-    Returns (a_pred, P_pred, a_filt, P_filt, loglik).
-    """
-    Y = np.asarray(Y, dtype=float)
-    T_mat = np.asarray(ss.T, dtype=float)
-    Q = np.asarray(ss.Q, dtype=float)
-    C = np.asarray(ss.C, dtype=float)
-    R = np.asarray(ss.R, dtype=float)
-    a_prev = np.asarray(ss.a0, dtype=float).copy()
-    P_prev = np.asarray(ss.P0, dtype=float).copy()
+    One-sided Kalman filter with missing data (NaNs).
 
-    Tn, n_obs = Y.shape
-    m = a_prev.shape[0]
+    Improvements:
+    - Cache observation patterns (obs_idx) and corresponding C_t / R slices.
+    - Treat R as diagonal when it is (numerically) diagonal:
+        avoid dense R[np.ix_(obs_idx, obs_idx)] and use diag(r_obs) updates.
+    """
+    Y = np.asarray(Y, float)
+    Tn, n = Y.shape
+
+    T_mat, Q, C, R, a0, P0 = ss.T, ss.Q, ss.C, ss.R, ss.a0, ss.P0
+    m = a0.shape[0]
 
     a_pred = np.zeros((Tn, m))
     P_pred = np.zeros((Tn, m, m))
     a_filt = np.zeros((Tn, m))
     P_filt = np.zeros((Tn, m, m))
 
+    a_prev = a0.copy()
+    P_prev = P0.copy()
+    I_m = np.eye(m)
     loglik = 0.0
 
-    # Detect diagonal R
-    use_diag_R = (R.ndim == 1) or (R.ndim == 2 and np.allclose(R, np.diag(np.diag(R))))
-    if R.ndim == 2 and use_diag_R:
+    # Detect diagonal-R fast path once
+    use_diag_R = False
+    R_diag = None
+    if R.ndim == 2 and R.shape[0] == R.shape[1]:
         R_diag = np.diag(R).copy()
+        off = R - np.diag(R_diag)
+        if np.max(np.abs(off)) < 1e-12:
+            use_diag_R = True
     elif R.ndim == 1:
-        R_diag = R.copy()
-    else:
-        R_diag = None
+        R_diag = R.astype(float)
+        use_diag_R = True
 
-    I = np.eye(m)
+    # Cache observation patterns:
+    # key = obs_mask.tobytes()
+    # value = (obs_idx, C_t, r_obs) if diagonal-R
+    #      or (obs_idx, C_t, R_t)   if dense-R
+    obs_cache = {}
 
     for t in range(Tn):
-        # Predict
-        a_pr = T_mat @ a_prev
-        P_pr = _sym(T_mat @ P_prev @ T_mat.T + Q)
+        # prediction
+        if t == 0:
+            a_pr = a_prev
+            P_pr = P_prev
+        else:
+            a_pr = T_mat @ a_prev
+            P_pr = T_mat @ P_prev @ T_mat.T + Q
 
+        P_pr = _sym(P_pr)
         a_pred[t] = a_pr
         P_pred[t] = P_pr
 
         y_t = Y[t]
-        obs_mask = np.isfinite(y_t)
+        obs_mask = ~np.isnan(y_t)
         if not np.any(obs_mask):
             a_filt[t] = a_pr
             P_filt[t] = P_pr
             a_prev, P_prev = a_pr, P_pr
             continue
 
-        y_obs = y_t[obs_mask]
-        C_obs = C[obs_mask, :]
+        key = obs_mask.tobytes()
+        cached = obs_cache.get(key, None)
+        if cached is None:
+            obs_idx = np.flatnonzero(obs_mask)
+            C_t = C[obs_idx, :]
 
-        r_obs: Optional[np.ndarray] = None  # for static analyzers
+            if use_diag_R:
+                r_obs = R_diag[obs_idx]
+                obs_cache[key] = (obs_idx, C_t, r_obs)
+            else:
+                R_t = R[np.ix_(obs_idx, obs_idx)]
+                obs_cache[key] = (obs_idx, C_t, R_t)
+
+            cached = obs_cache[key]
+
+        obs_idx, C_t, R_piece = cached
+        y_obs = y_t[obs_idx]
+
+        # innovation
+        v = y_obs - C_t @ a_pr
+        S = _sym(C_t @ P_pr @ C_t.T)
 
         if use_diag_R:
-            assert R_diag is not None
-            r_obs = R_diag[obs_mask]
-            S = _sym(C_obs @ P_pr @ C_obs.T + np.diag(r_obs))
+            r_obs = R_piece  # (k,)
+            d = np.diag_indices(S.shape[0])
+            S[d] += r_obs
         else:
-            R_t = R[np.ix_(obs_mask, obs_mask)]
-            S = _sym(C_obs @ P_pr @ C_obs.T + R_t)
+            R_t = R_piece
+            S = S + R_t
 
-        factS = _cho_factor_pd(S, jitter=jitter)
-        v = y_obs - (C_obs @ a_pr)
+        S = _sym(S)
 
-        # loglik contribution
-        if _HAVE_SCIPY:
-            sign, logdet = np.linalg.slogdet(S)
-            if sign <= 0:
-                # fallback: use cholesky diag
-                L, _ = factS
-                logdet = 2.0 * np.sum(np.log(np.diag(L)))
-        else:
-            L, _ = factS
-            logdet = 2.0 * np.sum(np.log(np.diag(L)))
+        factS = _cho_factor_pd(S, jitter=1e-9)
+        S_inv_v = _cho_solve(factS, v)
 
-        Sv = _cho_solve(factS, v)
-        loglik += -0.5 * (v.T @ Sv + logdet + y_obs.size * np.log(2.0 * np.pi))
+        # loglik
+        Ltri = factS[0]
+        logdet_S = 2.0 * float(np.sum(np.log(np.diag(Ltri))))
+        k = int(obs_idx.size)
+        loglik += -0.5 * (logdet_S + float(v @ S_inv_v) + k * np.log(2.0 * np.pi))
 
-        # Gain
-        PCt = P_pr @ C_obs.T
-        K = _cho_solve(factS, PCt.T).T  # (m,k)
+        # K = P_pr C_t' S^{-1} = (S^{-1} C_t P_pr)'
+        B = C_t @ P_pr  # (k, m)
+        S_inv_B = _cho_solve(factS, B)  # (k, m)
+        K = S_inv_B.T  # (m, k)
+
+        I_KC = I_m - K @ C_t
 
         # Joseph covariance update
-        I_KC = I - K @ C_obs
         if use_diag_R:
-            assert r_obs is not None
+            r_obs = R_piece
             KR = K * r_obs[None, :]  # (m,k)
             P_upd = I_KC @ P_pr @ I_KC.T + KR @ K.T
         else:
-            R_piece = R[np.ix_(obs_mask, obs_mask)]
-            P_upd = I_KC @ P_pr @ I_KC.T + K @ R_piece @ K.T
+            R_t = R_piece
+            P_upd = I_KC @ P_pr @ I_KC.T + K @ R_t @ K.T
 
         P_upd = _sym(P_upd)
         a_upd = a_pr + K @ v
@@ -309,9 +333,9 @@ def kalman_filter_smoother(Y: np.ndarray, ss: StateSpaceParams) -> KalmanSmoothe
     )
 
 
-# ---------------------------------------------------------------------
-# Backward-compatible wrappers expected by eval_pseudort/bm_pseudort.py
-# ---------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Compatibility wrappers
+# -----------------------------------------------------------------------------
 
 def kalman_filter(
     *,
@@ -322,23 +346,20 @@ def kalman_filter(
     Q: np.ndarray,
     a0: np.ndarray,
     P0: np.ndarray,
-) -> Dict[str, Any]:
-    """
-    Backward-compatible Kalman filter API.
+):
+    """Backward-compatible wrapper.
 
-    Returns a dict 'kf' that can be passed to kalman_smoother(kf).
+    Older code in this repo expects `kalman_filter(Y=..., T=..., Z=..., R=..., Q=..., a0=..., P0=...)`
+    returning a dict-like object consumed by `kalman_smoother`.
+
+    Notes:
+      - Here `Z` is the measurement matrix (called `C` elsewhere).
+      - This wrapper stores `Y` and the constructed `StateSpaceParams` in the returned dict.
     """
-    ss = StateSpaceParams(
-        T=np.asarray(T, float),
-        Q=np.asarray(Q, float),
-        C=np.asarray(Z, float),
-        R=np.asarray(R, float),
-        a0=np.asarray(a0, float),
-        P0=np.asarray(P0, float),
-    )
-    a_pred, P_pred, a_filt, P_filt, loglik = kalman_filter_only(np.asarray(Y, float), ss)
+    ss = StateSpaceParams(T=np.asarray(T), Q=np.asarray(Q), C=np.asarray(Z), R=np.asarray(R), a0=np.asarray(a0), P0=np.asarray(P0))
+    a_pred, P_pred, a_filt, P_filt, loglik = kalman_filter_only(np.asarray(Y), ss)
     return {
-        "Y": np.asarray(Y, float),
+        "Y": np.asarray(Y),
         "ss": ss,
         "a_pred": a_pred,
         "P_pred": P_pred,
@@ -348,52 +369,13 @@ def kalman_filter(
     }
 
 
-def kalman_smoother(kf: Dict[str, Any]) -> Dict[str, Any]:
+def kalman_smoother(kf_res):
+    """Backward-compatible smoother wrapper.
+
+    Expects output from `kalman_filter` above.
+    Returns an object exposing a_smooth, P_smooth, P_lag_smooth and loglik.
     """
-    Backward-compatible RTS smoother API.
-
-    Accepts the dict returned by kalman_filter and returns a dict with keys:
-      a_smooth, P_smooth, P_lag_smooth, plus filter arrays and loglik.
-    """
-    ss: StateSpaceParams = kf["ss"]
-    a_pred = kf["a_pred"]
-    P_pred = kf["P_pred"]
-    a_filt = kf["a_filt"]
-    P_filt = kf["P_filt"]
-    loglik = float(kf.get("loglik", 0.0))
-
-    T_mat = ss.T
-    Tn, m = a_filt.shape
-
-    a_smooth = np.zeros_like(a_filt)
-    P_smooth = np.zeros_like(P_filt)
-    J = np.zeros((max(Tn - 1, 0), m, m))
-
-    a_smooth[-1] = a_filt[-1]
-    P_smooth[-1] = P_filt[-1]
-
-    for t in range(Tn - 2, -1, -1):
-        P_pred_next = _sym(P_pred[t + 1])
-        factP = _cho_factor_pd(P_pred_next, jitter=1e-9)
-
-        M = P_filt[t] @ T_mat.T
-        J_t = _cho_solve(factP, M.T).T
-        J[t] = J_t
-
-        a_smooth[t] = a_filt[t] + J_t @ (a_smooth[t + 1] - a_pred[t + 1])
-        P_smooth[t] = _sym(P_filt[t] + J_t @ (P_smooth[t + 1] - P_pred_next) @ J_t.T)
-
-    P_lag_smooth = np.zeros_like(P_smooth)
-    for t in range(1, Tn):
-        P_lag_smooth[t] = P_smooth[t] @ J[t - 1].T
-
-    return {
-        "a_pred": a_pred,
-        "P_pred": P_pred,
-        "a_filt": a_filt,
-        "P_filt": P_filt,
-        "a_smooth": a_smooth,
-        "P_smooth": P_smooth,
-        "P_lag_smooth": P_lag_smooth,
-        "loglik": loglik,
-    }
+    ss = kf_res["ss"]
+    Y = kf_res["Y"]
+    sm = kalman_filter_smoother(np.asarray(Y), ss)
+    return sm
