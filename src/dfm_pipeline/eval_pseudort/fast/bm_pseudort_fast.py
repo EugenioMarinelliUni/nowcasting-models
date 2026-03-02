@@ -111,6 +111,10 @@ def _mask_quarterly_target_release(
     eval_date: pd.Timestamp,
     gdp_rel: int,
 ) -> pd.Series:
+    """
+    Mask quarterly target observations not yet released by eval_date.
+    If gdp_rel=1, quarter-end value becomes observable at quarter_end + 1 month.
+    """
     y = y.copy()
     if gdp_rel <= 0:
         return y
@@ -125,6 +129,26 @@ def _mask_quarterly_target_release(
     return y
 
 
+def _apply_quarter_end_leakage_guard(
+    y: pd.Series,
+    eval_date: pd.Timestamp,
+    *,
+    no_qe_leak: bool,
+) -> pd.Series:
+    """
+    Prevent quarter-end leakage: at quarter-end month (moq=3), force y(eval_date)=NaN.
+    This ensures the m3 "nowcast" does not use the contemporaneous quarterly observation.
+    """
+    if not no_qe_leak:
+        return y
+    t = pd.Timestamp(eval_date).to_period("M").to_timestamp(how="start")
+    if _month_in_quarter(t) == 3:
+        y = y.copy()
+        if t in y.index:
+            y.loc[t] = np.nan
+    return y
+
+
 # -----------------------------------------------------------------------------
 # Extract transition/measurement matrices from fit results
 # -----------------------------------------------------------------------------
@@ -133,9 +157,11 @@ def _extract_transition_and_measurement(res: Any, *, n_obs_expected: int) -> tup
     A = _squeeze_last(np.asarray(_to_attr(res, "A"), dtype=float))
     C = _squeeze_last(np.asarray(_to_attr(res, "C"), dtype=float))
 
+    # In this codebase: C is transition (square), A is measurement (n_obs x n_state)
     if _is_square(C) and A.ndim == 2 and A.shape[0] == n_obs_expected and A.shape[1] == C.shape[0]:
         return C, A
 
+    # Alternative naming if swapped:
     if _is_square(A) and C.ndim == 2 and C.shape[0] == n_obs_expected and C.shape[1] == A.shape[0]:
         return A, C
 
@@ -206,7 +232,6 @@ def _smooth_fixed_params(
     # Observations: [monthly..., quarterly_target]
     Y_obs = np.concatenate([Y_monthly, y_quarterly[:, None]], axis=1)
 
-    # kalman_filter in your project requires keyword-only Y (some versions use y)
     kf = _call_supported(
         kalman_filter,
         Y=Y_obs,
@@ -219,16 +244,12 @@ def _smooth_fixed_params(
         P0=P0,
     )
 
-    # kalman_smoother signature differs across versions; handle the common cases.
-    # 1) positional required (kf_res)
     try:
         ks = kalman_smoother(kf)  # type: ignore[misc]
     except TypeError:
-        # 2) keyword required kf_res
         try:
             ks = kalman_smoother(kf_res=kf)  # type: ignore[misc]
         except TypeError:
-            # 3) our signature-safe keyword call
             ks = _call_supported(
                 kalman_smoother,
                 kf_res=kf,
@@ -292,6 +313,7 @@ class EvalConfig:
     delay_json: Optional[str] = None
     gdp_rel: int = 0
     horizons: Tuple[str, ...] = ("now",)
+    no_qe_leak: bool = False  # NEW
 
 
 # -----------------------------------------------------------------------------
@@ -357,7 +379,11 @@ def run_pseudo_rt_eval_fast(
         if len(X_tr) < min_T:
             raise ValueError(f"Training window too short. len(X_tr)={len(X_tr)} < {min_T}")
 
+        # release mask at training end
         y_tr_m = _mask_quarterly_target_release(y_tr, eval_date=train_end_ts, gdp_rel=int(eval_cfg.gdp_rel))
+        # quarter-end leakage guard at training end (rarely matters, but keeps definitions consistent)
+        y_tr_m = _apply_quarter_end_leakage_guard(y_tr_m, train_end_ts, no_qe_leak=bool(eval_cfg.no_qe_leak))
+
         if np.isfinite(y_tr_m.to_numpy(dtype=float)).sum() < min_q_obs:
             raise ValueError("Training window has no quarterly observations after masking.")
 
@@ -405,10 +431,19 @@ def run_pseudo_rt_eval_fast(
             delay_style=str(getattr(eval_cfg, "delay_style", "none")),
             delay_map=delay_map,
         )
+
+        # Apply quarterly release mask
         y_v = _mask_quarterly_target_release(
             y_v,
             eval_date=pd.Timestamp(t),
             gdp_rel=int(getattr(eval_cfg, "gdp_rel", 0)),
+        )
+
+        # Apply quarter-end leakage guard (NEW)
+        y_v = _apply_quarter_end_leakage_guard(
+            y_v,
+            pd.Timestamp(t),
+            no_qe_leak=bool(getattr(eval_cfg, "no_qe_leak", False)),
         )
 
         if np.isfinite(y_v.to_numpy(dtype=float)).sum() < min_q_obs:
@@ -474,6 +509,8 @@ def run_pseudo_rt_eval_fast(
                     "actual": actual_raw,
                     "scaling_mode": scaling_mode,
                     "fixed_params": bool(fixed_params),
+                    "no_qe_leak": bool(getattr(eval_cfg, "no_qe_leak", False)),
+                    "gdp_rel": int(getattr(eval_cfg, "gdp_rel", 0)),
                 }
             )
 
@@ -643,6 +680,9 @@ def main(argv=None) -> int:
     ap.add_argument("--train_end", default=None)
     ap.add_argument("--train_max_iter", type=int, default=None)
 
+    # NEW: leakage guard
+    ap.add_argument("--no_qe_leak", action="store_true", help="Do not use quarter-end target observation at moq=3")
+
     args = ap.parse_args(argv)
 
     base = Path("dataset") / args.panel / args.dataset / args.tag
@@ -666,6 +706,7 @@ def main(argv=None) -> int:
         delay_json=args.delay_json,
         gdp_rel=int(args.gdp_rel),
         horizons=("now",),
+        no_qe_leak=bool(args.no_qe_leak),
     )
 
     cfg = BMDfmConfig(
@@ -715,6 +756,7 @@ def main(argv=None) -> int:
         f"bm_pseudort_fast_miq__{args.panel}__{args.dataset}__{args.tag}__{args.method}"
         f"__r{args.r}__p{args.p}"
         + ("__fixed" if args.fixed_params else "")
+        + ("__no_qe_leak" if args.no_qe_leak else "")
         + ".csv"
     )
 
