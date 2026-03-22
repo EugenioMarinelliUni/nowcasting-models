@@ -229,7 +229,6 @@ def _smooth_fixed_params(
 
     Tm, Qm, C_meas, R_meas, a0, P0, _idx = ss_out
 
-    # Observations: [monthly..., quarterly_target]
     Y_obs = np.concatenate([Y_monthly, y_quarterly[:, None]], axis=1)
 
     kf = _call_supported(
@@ -313,7 +312,7 @@ class EvalConfig:
     delay_json: Optional[str] = None
     gdp_rel: int = 0
     horizons: Tuple[str, ...] = ("now",)
-    no_qe_leak: bool = False  # NEW
+    no_qe_leak: bool = False
 
 
 # -----------------------------------------------------------------------------
@@ -366,7 +365,6 @@ def run_pseudo_rt_eval_fast(
     min_T = int(max(12, 3 * max(1, int(getattr(model_config, "p", 1))) + 5))
     min_q_obs = 1
 
-    # Fit once (fixed params)
     params_fixed = None
     if fixed_params:
         if train_end is None:
@@ -379,9 +377,7 @@ def run_pseudo_rt_eval_fast(
         if len(X_tr) < min_T:
             raise ValueError(f"Training window too short. len(X_tr)={len(X_tr)} < {min_T}")
 
-        # release mask at training end
         y_tr_m = _mask_quarterly_target_release(y_tr, eval_date=train_end_ts, gdp_rel=int(eval_cfg.gdp_rel))
-        # quarter-end leakage guard at training end (rarely matters, but keeps definitions consistent)
         y_tr_m = _apply_quarter_end_leakage_guard(y_tr_m, train_end_ts, no_qe_leak=bool(eval_cfg.no_qe_leak))
 
         if np.isfinite(y_tr_m.to_numpy(dtype=float)).sum() < min_q_obs:
@@ -432,14 +428,12 @@ def run_pseudo_rt_eval_fast(
             delay_map=delay_map,
         )
 
-        # Apply quarterly release mask
         y_v = _mask_quarterly_target_release(
             y_v,
             eval_date=pd.Timestamp(t),
             gdp_rel=int(getattr(eval_cfg, "gdp_rel", 0)),
         )
 
-        # Apply quarter-end leakage guard (NEW)
         y_v = _apply_quarter_end_leakage_guard(
             y_v,
             pd.Timestamp(t),
@@ -652,6 +646,7 @@ def main(argv=None) -> int:
 
     ap.add_argument("--max_iter", type=int, default=200)
     ap.add_argument("--tol", type=float, default=1e-6)
+    ap.add_argument("--convergence_mode", choices=["absolute_ll", "toolbox_rel"], default="toolbox_rel")
 
     ap.add_argument("--eval_start", default=None)
     ap.add_argument("--eval_end", default=None)
@@ -680,7 +675,6 @@ def main(argv=None) -> int:
     ap.add_argument("--train_end", default=None)
     ap.add_argument("--train_max_iter", type=int, default=None)
 
-    # NEW: leakage guard
     ap.add_argument("--no_qe_leak", action="store_true", help="Do not use quarter-end target observation at moq=3")
 
     args = ap.parse_args(argv)
@@ -715,6 +709,7 @@ def main(argv=None) -> int:
         idio_ar1=True,
         max_iter=int(args.max_iter),
         tol=float(args.tol),
+        convergence_mode=str(args.convergence_mode),
         mm_weight_style=args.mm_weight_style,
         scaling_mode=args.scaling_mode,
     )

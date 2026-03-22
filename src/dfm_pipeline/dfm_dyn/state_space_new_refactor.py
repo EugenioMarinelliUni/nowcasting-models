@@ -1,15 +1,23 @@
-# src/dfm_pipeline/dfm_dyn/state_space_new.py
+# src/dfm_pipeline/dfm_dyn/state_space_new_refactor.py
 
 import numpy as np
 from dataclasses import dataclass
 from typing import Optional, List, Tuple
 
-# SciPy Cholesky tools (faster than np.linalg.solve in this pattern)
+# --- line_profiler compat (removes "profile can be undefined" warnings) ---
+try:  # pragma: no cover
+    profile  # type: ignore[name-defined]
+except NameError:  # pragma: no cover
+    def profile(func):  # type: ignore[no-redef]
+        return func
+
+
+# SciPy Cholesky tools
 try:
     import scipy.linalg as sla
 
     _HAVE_SCIPY = True
-except Exception:
+except Exception:  # pragma: no cover
     sla = None
     _HAVE_SCIPY = False
 
@@ -43,10 +51,7 @@ def _sym(A: np.ndarray) -> np.ndarray:
 
 def _chol_factor_numpy(A: np.ndarray, jitter: float = 1e-9, max_tries: int = 12) -> np.ndarray:
     """
-    Cholesky factorization with diagonal jitter fallback (scale-aware).
-
-    The jitter schedule is scaled by max(diag(A)) to be robust across different
-    matrix magnitudes.
+    Numpy Cholesky with diagonal jitter fallback (scale-aware).
     """
     A = _sym(A)
     n = A.shape[0]
@@ -66,6 +71,7 @@ def _chol_factor_numpy(A: np.ndarray, jitter: float = 1e-9, max_tries: int = 12)
         except np.linalg.LinAlgError:
             j = (jitter * scale) if j == 0.0 else (10.0 * j)
 
+    # last attempt: eigenvalue floor (scale-aware)
     w, V = np.linalg.eigh(A)
     w = np.maximum(w, jitter * scale)
     A_pd = (V * w) @ V.T
@@ -109,10 +115,10 @@ def _cho_factor_pd(A: np.ndarray, jitter: float = 1e-9, max_tries: int = 12):
         except Exception:
             j = (jitter * scale) if j == 0.0 else (10.0 * j)
 
+    # last attempt: eigenvalue floor (scale-aware)
     w, V = np.linalg.eigh(A)
     w = np.maximum(w, jitter * scale)
     A_pd = _sym((V * w) @ V.T)
-
     return sla.cho_factor(
         A_pd,
         lower=True,
@@ -148,7 +154,7 @@ def build_companion_transition(
     T = np.zeros((m, m))
     T[:r, : r * p] = np.hstack(Phi_list)
     for j in range(1, p):
-        T[j * r : (j + 1) * r, (j - 1) * r : j * r] = np.eye(r)
+        T[j * r: (j + 1) * r, (j - 1) * r: j * r] = np.eye(r)
 
     Q = np.zeros((m, m))
     Q[:r, :r] = Q_u
@@ -187,18 +193,36 @@ def build_dfm_state_space(
     return StateSpaceParams(T=T, Q=Q, C=C, R=R, a0=a0, P0=P0)
 
 
+def _joseph_update(
+    *,
+    P_pr: np.ndarray,
+    K: np.ndarray,
+    C_t: np.ndarray,
+    use_diag_R: bool,
+    R_piece: np.ndarray,
+    I_m: np.ndarray,
+) -> np.ndarray:
+    """Joseph form covariance update (numerically robust, slower)."""
+    I_KC = I_m - K @ C_t
+    if use_diag_R:
+        r_obs = R_piece  # (k,)
+        KR = K * r_obs[None, :]
+        P_upd = I_KC @ P_pr @ I_KC.T + KR @ K.T
+    else:
+        P_upd = I_KC @ P_pr @ I_KC.T + K @ R_piece @ K.T
+    return _sym(P_upd)
+
+
+@profile
 def kalman_filter_only(Y: np.ndarray, ss: StateSpaceParams):
     """
-    One-sided Kalman filter with missing data (NaNs).
-
-    Notes:
-    - Caches observation patterns (obs_idx) and corresponding C_t / R slices.
-    - If R is diagonal (R.ndim==1 or numerically diagonal matrix), uses a diagonal update,
-      avoiding dense submatrix extraction.
-    - This implementation contains no np.ix_ calls.
+    Arithmetic-refactor version:
+      - reuse B = C_t @ P_pr for both S and K
+      - avoid np.ix_ in the R slicing path (dense-R uses 2D fancy indexing cache)
+      - PRIORITY 1: replace Joseph update with standard update (fast) + safe fallback
     """
     Y = np.asarray(Y, float)
-    Tn, n = Y.shape
+    Tn, _n = Y.shape
 
     T_mat, Q, C, R, a0, P0 = ss.T, ss.Q, ss.C, ss.R, ss.a0, ss.P0
     m = a0.shape[0]
@@ -228,11 +252,13 @@ def kalman_filter_only(Y: np.ndarray, ss: StateSpaceParams):
             use_diag_R = True
             R_diag = np.maximum(R_diag_tmp, 1e-10)
 
-    # Cache observation patterns:
-    # key = obs_mask.tobytes()
+    # Cache observation patterns
     # value = (obs_idx, C_t, r_obs) if diagonal-R
     #      or (obs_idx, C_t, R_t)   if dense-R
     obs_cache = {}
+
+    # tiny PSD floor for roundoff (applied only if needed)
+    diag_floor = 1e-12
 
     for t in range(Tn):
         # prediction
@@ -241,7 +267,8 @@ def kalman_filter_only(Y: np.ndarray, ss: StateSpaceParams):
             P_pr = P_prev
         else:
             a_pr = T_mat @ a_prev
-            P_pr = T_mat @ P_prev @ T_mat.T + Q
+            TP = T_mat @ P_prev
+            P_pr = TP @ T_mat.T + Q
 
         P_pr = _sym(P_pr)
         a_pred[t] = a_pr
@@ -256,16 +283,17 @@ def kalman_filter_only(Y: np.ndarray, ss: StateSpaceParams):
             continue
 
         key = obs_mask.tobytes()
-        cached = obs_cache.get(key, None)
+        cached = obs_cache.get(key)
         if cached is None:
             obs_idx = np.flatnonzero(obs_mask).astype(np.int64)
             C_t = C[obs_idx, :]
 
             if use_diag_R:
+                if R_diag is None:
+                    raise RuntimeError("Internal error: R_diag is None in diagonal-R path.")
                 r_obs = R_diag[obs_idx]
                 obs_cache[key] = (obs_idx, C_t, r_obs)
             else:
-                # Dense R: extract submatrix without np.ix_
                 obs_col = obs_idx[:, None]
                 obs_row = obs_idx[None, :]
                 R_t = R[obs_col, obs_row]
@@ -278,11 +306,13 @@ def kalman_filter_only(Y: np.ndarray, ss: StateSpaceParams):
 
         # innovation
         v = y_obs - C_t @ a_pr
-        S = _sym(C_t @ P_pr @ C_t.T)
+
+        # reuse B = C_t @ P_pr for both S and K
+        B = C_t @ P_pr            # (k, m)
+        S = B @ C_t.T             # (k, k)
 
         if use_diag_R:
             r_obs = R_piece  # (k,)
-            # add r_obs to diagonal without constructing indices
             S.flat[:: S.shape[0] + 1] += r_obs
         else:
             S = S + R_piece
@@ -298,23 +328,23 @@ def kalman_filter_only(Y: np.ndarray, ss: StateSpaceParams):
         k = int(obs_idx.size)
         loglik += -0.5 * (logdet_S + float(v @ S_inv_v) + k * np.log(2.0 * np.pi))
 
-        # K = P_pr C_t' S^{-1} = (S^{-1} C_t P_pr)'
-        B = C_t @ P_pr  # (k, m)
+        # K = (S^{-1} B)^T
         S_inv_B = _cho_solve(factS, B)  # (k, m)
-        K = S_inv_B.T  # (m, k)
+        K = S_inv_B.T                   # (m, k)
 
-        I_KC = I_m - K @ C_t
-
-        # Joseph covariance update
-        if use_diag_R:
-            r_obs = R_piece
-            KR = K * r_obs[None, :]  # (m,k)
-            P_upd = I_KC @ P_pr @ I_KC.T + KR @ K.T
-        else:
-            P_upd = I_KC @ P_pr @ I_KC.T + K @ R_piece @ K.T
-
-        P_upd = _sym(P_upd)
+        # state update
         a_upd = a_pr + K @ v
+
+        # standard covariance update (fast), with fallback to Joseph if needed
+        P_upd = P_pr - K @ B
+        P_upd = _sym(P_upd)
+
+        d = np.diag(P_upd)
+        if (not np.all(np.isfinite(d))) or (float(np.min(d)) < -1e-8):
+            P_upd = _joseph_update(P_pr=P_pr, K=K, C_t=C_t, use_diag_R=use_diag_R, R_piece=R_piece, I_m=I_m)
+        else:
+            if float(np.min(d)) < diag_floor:
+                P_upd[np.diag_indices_from(P_upd)] = np.maximum(d, diag_floor)
 
         a_filt[t] = a_upd
         P_filt[t] = P_upd
@@ -324,7 +354,15 @@ def kalman_filter_only(Y: np.ndarray, ss: StateSpaceParams):
 
 
 def kalman_filter_smoother(Y: np.ndarray, ss: StateSpaceParams) -> KalmanSmootherResult:
-    """Kalman filter + RTS smoother with missing data (NaNs)."""
+    """
+    Kalman filter + RTS smoother with missing data (NaNs).
+
+    FIX B:
+      - remove J allocation
+      - compute P_lag_smooth[t] inside backward pass:
+          P_lag_smooth[t+1] = P_smooth[t+1] @ J_t.T
+      - remove the extra forward pass over t
+    """
     a_pred, P_pred, a_filt, P_filt, loglik = kalman_filter_only(Y, ss)
 
     T_mat = ss.T
@@ -332,7 +370,7 @@ def kalman_filter_smoother(Y: np.ndarray, ss: StateSpaceParams) -> KalmanSmoothe
 
     a_smooth = np.zeros_like(a_filt)
     P_smooth = np.zeros_like(P_filt)
-    J = np.zeros((max(Tn - 1, 0), m, m))
+    P_lag_smooth = np.zeros_like(P_filt)
 
     a_smooth[-1] = a_filt[-1]
     P_smooth[-1] = P_filt[-1]
@@ -344,14 +382,12 @@ def kalman_filter_smoother(Y: np.ndarray, ss: StateSpaceParams) -> KalmanSmoothe
         # J_t = P_filt[t] T' P_pred[t+1]^{-1}
         M = P_filt[t] @ T_mat.T
         J_t = _cho_solve(factP, M.T).T
-        J[t] = J_t
+
+        # lag-one covariance for (t+1, t)
+        P_lag_smooth[t + 1] = P_smooth[t + 1] @ J_t.T
 
         a_smooth[t] = a_filt[t] + J_t @ (a_smooth[t + 1] - a_pred[t + 1])
         P_smooth[t] = _sym(P_filt[t] + J_t @ (P_smooth[t + 1] - P_pred_next) @ J_t.T)
-
-    P_lag_smooth = np.zeros_like(P_smooth)
-    for t in range(1, Tn):
-        P_lag_smooth[t] = P_smooth[t] @ J[t - 1].T
 
     return KalmanSmootherResult(
         a_pred=a_pred,
@@ -379,15 +415,7 @@ def kalman_filter(
     a0: np.ndarray,
     P0: np.ndarray,
 ):
-    """Backward-compatible wrapper.
-
-    Older code in this repo expects `kalman_filter(Y=..., T=..., Z=..., R=..., Q=..., a0=..., P0=...)`
-    returning a dict-like object consumed by `kalman_smoother`.
-
-    Notes:
-      - Here `Z` is the measurement matrix (called `C` elsewhere).
-      - This wrapper stores `Y` and the constructed `StateSpaceParams` in the returned dict.
-    """
+    """Backward-compatible wrapper."""
     ss = StateSpaceParams(
         T=np.asarray(T),
         Q=np.asarray(Q),
@@ -409,12 +437,7 @@ def kalman_filter(
 
 
 def kalman_smoother(kf_res):
-    """Backward-compatible smoother wrapper.
-
-    Expects output from `kalman_filter` above.
-    Returns an object exposing a_smooth, P_smooth, P_lag_smooth and loglik.
-    """
+    """Backward-compatible smoother wrapper."""
     ss = kf_res["ss"]
     Y = kf_res["Y"]
-    sm = kalman_filter_smoother(np.asarray(Y), ss)
-    return sm
+    return kalman_filter_smoother(np.asarray(Y), ss)

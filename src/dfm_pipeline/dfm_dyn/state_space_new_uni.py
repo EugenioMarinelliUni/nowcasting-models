@@ -1,18 +1,4 @@
-"""
-NEW (univariate) Kalman filter implementation for diagonal measurement noise.
-
-This is algebraically equivalent to the multivariate update when H is diagonal:
-  y_t = Z a_t + e_t,  e_t ~ N(0, H),  H diagonal
-
-It replaces the kxk innovation Cholesky per time step with k scalar updates
-(one per observed series), which is typically much faster when the cross-section
-is large and the state dimension is moderate.
-
-Notes:
-  - If H is not diagonal (beyond a tolerance), we fall back to state_space_new.
-  - Numerical results match the multivariate version up to floating-point noise
-    (update order differs).
-"""
+# src/dfm_pipeline/dfm_dyn/state_space_new_uni.py
 
 from __future__ import annotations
 
@@ -20,209 +6,214 @@ import numpy as np
 
 from . import state_space_new as ss_mv
 
-
-def _as_diag(H: np.ndarray, tol: float) -> np.ndarray | None:
-    """Return diag(H) if H is (approximately) diagonal; else None."""
-    H = np.asarray(H)
-    if H.ndim == 1:
-        return H.astype(float, copy=False)
-    if H.ndim != 2 or H.shape[0] != H.shape[1]:
-        raise ValueError("H must be (n,n) or (n,)")
-
-    off = H - np.diag(np.diag(H))
-    if np.max(np.abs(off)) > tol:
-        return None
-    return np.diag(H).astype(float, copy=False)
+# Re-export common API types so dispatchers/type-checkers see them.
+StateSpaceParams = ss_mv.StateSpaceParams
+KalmanSmootherResult = ss_mv.KalmanSmootherResult
 
 
 def _build_obs_csr(Y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Build CSR-style index lists for non-missing observations per time t.
-
-    Returns:
-      indptr: shape (T+1,)
-      indices: concatenated observed indices (int64)
-    """
     Y = np.asarray(Y)
     if Y.ndim != 2:
         raise ValueError("Y must be 2D (T, n_obs)")
-
     obs_mask = ~np.isnan(Y)
-    T, _n = obs_mask.shape
+    T, _ = obs_mask.shape
     counts = obs_mask.sum(axis=1).astype(np.int64)
     indptr = np.empty(T + 1, dtype=np.int64)
     indptr[0] = 0
     np.cumsum(counts, out=indptr[1:])
-
     indices = np.empty(indptr[-1], dtype=np.int64)
     pos = 0
     for t in range(T):
         idx = np.nonzero(obs_mask[t])[0].astype(np.int64)
-        k = idx.size
-        indices[pos : pos + k] = idx
-        pos += k
+        indices[pos : pos + idx.size] = idx
+        pos += idx.size
     return indptr, indices
+
+
+def _chol_pd(A: np.ndarray, *, base_jitter: float = 1e-10, max_tries: int = 12) -> np.ndarray:
+    A = ss_mv._sym(np.asarray(A, dtype=float))
+    n = A.shape[0]
+    if n == 0:
+        return A
+
+    diag = np.diag(A)
+    scale = float(np.max(diag)) if diag.size else 1.0
+    if (not np.isfinite(scale)) or scale <= 0.0:
+        scale = 1.0
+
+    I = np.eye(n, dtype=float)
+    j = 0.0
+    for _ in range(max_tries):
+        try:
+            return np.linalg.cholesky(A + j * I)
+        except np.linalg.LinAlgError:
+            j = (base_jitter * scale) if j == 0.0 else (10.0 * j)
+
+    w, V = np.linalg.eigh(A)
+    w = np.maximum(w, base_jitter * scale)
+    A_pd = ss_mv._sym((V * w) @ V.T)
+    return np.linalg.cholesky(A_pd)
+
+
+def _all_finite(*arrs: np.ndarray) -> bool:
+    return all(np.isfinite(a).all() for a in arrs)
+
+
+def _r_diag_from_R(R: np.ndarray, r_floor: float) -> np.ndarray:
+    R = np.asarray(R, dtype=float)
+    if R.ndim == 1:
+        d = R.copy()
+    elif R.ndim == 2 and R.shape[0] == R.shape[1]:
+        d = np.diag(R).copy()
+    else:
+        raise ValueError("R must be (n,) or (n,n)")
+    d = np.where(np.isfinite(d), d, r_floor)
+    return np.maximum(d, r_floor)
 
 
 def kalman_filter_only(
     Y: np.ndarray,
-    Z: np.ndarray,
-    H: np.ndarray,
-    Tm: np.ndarray,
-    Q: np.ndarray,
-    a0: np.ndarray,
-    P0: np.ndarray,
+    ss: StateSpaceParams,
     *,
-    diag_H_tol: float = 1e-12,
+    r_floor: float = 1e-6,
+    s_floor: float = 1e-6,
     obs_indptr: np.ndarray | None = None,
     obs_indices: np.ndarray | None = None,
     symmetrize: bool = True,
-) -> ss_mv.KalmanFilterResult:
+):
     """
-    Univariate Kalman filter (filtering only), for diagonal H.
-
-    Signature matches state_space_new.kalman_filter_only.
+    Stable univariate (sequential) Kalman filter for diagonal R.
+    API matches state_space_new.kalman_filter_only(Y, ss).
     """
     Y = np.asarray(Y, dtype=float)
-    Z = np.asarray(Z, dtype=float)
-    Tm = np.asarray(Tm, dtype=float)
-    Q = np.asarray(Q, dtype=float)
-    a0 = np.asarray(a0, dtype=float)
-    P0 = np.asarray(P0, dtype=float)
+    C = np.asarray(ss.C, dtype=float)
+    Tm = np.asarray(ss.T, dtype=float)
+    Q = np.asarray(ss.Q, dtype=float)
+    a0 = np.asarray(ss.a0, dtype=float)
+    P0 = ss_mv._sym(np.asarray(ss.P0, dtype=float))
 
-    H_diag = _as_diag(H, tol=diag_H_tol)
-    if H_diag is None:
-        # Fall back to multivariate implementation (full H).
-        return ss_mv.kalman_filter_only(Y, Z, H, Tm, Q, a0, P0)
+    R_diag = _r_diag_from_R(ss.R, r_floor=r_floor)
 
-    Tn, _n_obs = Y.shape
-    k_state = a0.shape[0]
+    Tn, _ = Y.shape
+    m = a0.shape[0]
 
     if obs_indptr is None or obs_indices is None:
         obs_indptr, obs_indices = _build_obs_csr(Y)
 
-    a_filt = np.zeros((Tn, k_state))
-    P_filt = np.zeros((Tn, k_state, k_state))
-    a_pred = np.zeros((Tn, k_state))
-    P_pred = np.zeros((Tn, k_state, k_state))
+    a_pred = np.zeros((Tn, m))
+    P_pred = np.zeros((Tn, m, m))
+    a_filt = np.zeros((Tn, m))
+    P_filt = np.zeros((Tn, m, m))
     loglik = 0.0
 
     a_prev = a0.copy()
     P_prev = P0.copy()
 
     for t in range(Tn):
-        # predict
         a_pr = Tm @ a_prev
-        P_pr = Tm @ P_prev @ Tm.T + Q
+        P_pr = ss_mv._sym(Tm @ P_prev @ Tm.T + Q)
 
         a = a_pr.copy()
         P = P_pr.copy()
 
-        # update: loop over observed series (scalar innovations)
         start = int(obs_indptr[t])
         end = int(obs_indptr[t + 1])
+
         for jj in range(start, end):
             i = int(obs_indices[jj])
-            y = Y[t, i]
+            y = float(Y[t, i])
 
-            c = Z[i, :]  # (k_state,)
-            r = H_diag[i]
+            h = C[i]  # (m,)
+            v = float(y - h @ a)
 
-            v = y - float(c @ a)
-            Pc = P @ c
-            s = float(c @ Pc) + float(r)
-            if s <= 0.0:
-                # Numerical guard; fall back to multivariate for this run
-                return ss_mv.kalman_filter_only(Y, Z, np.diag(H_diag), Tm, Q, a0, P0)
+            Pc = P @ h
+            s = float(h @ Pc + R_diag[i])
+            if (not np.isfinite(s)) or s < s_floor:
+                s = float(s_floor)
 
             inv_s = 1.0 / s
-            K = Pc * inv_s
+            a = a + Pc * (v * inv_s)
+            P = P - np.outer(Pc, Pc) * inv_s
 
-            a = a + K * v
-
-            cP = c @ P
-            P = P - np.outer(K, cP)
+            if symmetrize:
+                P = ss_mv._sym(P)
 
             loglik += -0.5 * (np.log(2.0 * np.pi) + np.log(s) + (v * v) * inv_s)
 
-        if symmetrize:
-            P = ss_mv._sym(P)
-
-        a_filt[t] = a
-        P_filt[t] = P
         a_pred[t] = a_pr
         P_pred[t] = P_pr
+        a_filt[t] = a
+        P_filt[t] = P
 
         a_prev, P_prev = a, P
 
-    return ss_mv.KalmanFilterResult(
-        a_filt=a_filt,
-        P_filt=P_filt,
-        a_pred=a_pred,
-        P_pred=P_pred,
-        loglik=float(loglik),
-    )
+    if not _all_finite(a_pred, P_pred, a_filt, P_filt):
+        raise RuntimeError("Univariate filter produced non-finite outputs (a/P).")
+
+    return a_pred, P_pred, a_filt, P_filt, float(loglik)
 
 
 def kalman_filter_smoother(
     Y: np.ndarray,
-    Z: np.ndarray,
-    H: np.ndarray,
-    Tm: np.ndarray,
-    Q: np.ndarray,
-    a0: np.ndarray,
-    P0: np.ndarray,
+    ss: StateSpaceParams,
     *,
-    diag_H_tol: float = 1e-12,
+    r_floor: float = 1e-6,
+    s_floor: float = 1e-6,
+    base_jitter: float = 1e-10,
     obs_indptr: np.ndarray | None = None,
     obs_indices: np.ndarray | None = None,
     symmetrize: bool = True,
-) -> ss_mv.KalmanSmootherResult:
+) -> KalmanSmootherResult:
     """
-    Univariate filter + RTS smoother.
+    Univariate filter + RTS smoother. API matches state_space_new.
+    """
+    Y = np.asarray(Y, dtype=float)
+    Tm = np.asarray(ss.T, dtype=float)
 
-    Signature matches state_space_new.kalman_filter_smoother.
-    """
-    kf = kalman_filter_only(
+    a_pred, P_pred, a_filt, P_filt, loglik = kalman_filter_only(
         Y,
-        Z,
-        H,
-        Tm,
-        Q,
-        a0,
-        P0,
-        diag_H_tol=diag_H_tol,
+        ss,
+        r_floor=r_floor,
+        s_floor=s_floor,
         obs_indptr=obs_indptr,
         obs_indices=obs_indices,
         symmetrize=symmetrize,
     )
 
-    Tn, k_state = kf.a_filt.shape
-    a_smooth = np.zeros_like(kf.a_filt)
-    P_smooth = np.zeros_like(kf.P_filt)
+    Tn, m = a_filt.shape
+    a_smooth = np.zeros_like(a_filt)
+    P_smooth = np.zeros_like(P_filt)
+    J = np.zeros((max(Tn - 1, 0), m, m))
 
-    a_smooth[-1] = kf.a_filt[-1]
-    P_smooth[-1] = kf.P_filt[-1]
+    a_smooth[-1] = a_filt[-1]
+    P_smooth[-1] = P_filt[-1]
 
     for t in range(Tn - 2, -1, -1):
-        P_f = kf.P_filt[t]
-        P_pr_next = kf.P_pred[t + 1]
+        P_pred_next = ss_mv._sym(P_pred[t + 1])
+        cf = _chol_pd(P_pred_next, base_jitter=base_jitter)
 
-        # J = P_f T' (P_pr_next)^{-1}
-        cf = np.linalg.cholesky(P_pr_next)
-        rhs = P_f @ Tm.T
+        rhs = P_filt[t] @ Tm.T
         tmp = np.linalg.solve(cf, rhs)
-        J = np.linalg.solve(cf.T, tmp)
+        J_t = np.linalg.solve(cf.T, tmp)
+        J[t] = J_t
 
-        a_smooth[t] = kf.a_filt[t] + J @ (a_smooth[t + 1] - kf.a_pred[t + 1])
-        P_smooth[t] = ss_mv._sym(P_f + J @ (P_smooth[t + 1] - P_pr_next) @ J.T)
+        a_smooth[t] = a_filt[t] + J_t @ (a_smooth[t + 1] - a_pred[t + 1])
+        P_smooth[t] = ss_mv._sym(P_filt[t] + J_t @ (P_smooth[t + 1] - P_pred_next) @ J_t.T)
+
+    P_lag_smooth = np.zeros_like(P_smooth)
+    for t in range(1, Tn):
+        P_lag_smooth[t] = P_smooth[t] @ J[t - 1].T
+
+    if not _all_finite(a_smooth, P_smooth, P_lag_smooth):
+        raise RuntimeError("Univariate smoother produced non-finite outputs.")
 
     return ss_mv.KalmanSmootherResult(
-        a_filt=kf.a_filt,
-        P_filt=kf.P_filt,
-        a_pred=kf.a_pred,
-        P_pred=kf.P_pred,
+        a_pred=a_pred,
+        P_pred=P_pred,
+        a_filt=a_filt,
+        P_filt=P_filt,
         a_smooth=a_smooth,
         P_smooth=P_smooth,
-        loglik=kf.loglik,
+        P_lag_smooth=P_lag_smooth,
+        loglik=float(loglik),
     )
