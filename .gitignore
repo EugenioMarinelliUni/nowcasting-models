@@ -90,3 +90,11 @@ data/metadata/panels/
 # local notes/helpers
 /docs/
 /scripts/bash/
+
+# ---- profiling / local outputs ----
+outputs/
+*.lprof
+*.pstats
+prof*.out
+prof*.txt
+prof_*.pstats
