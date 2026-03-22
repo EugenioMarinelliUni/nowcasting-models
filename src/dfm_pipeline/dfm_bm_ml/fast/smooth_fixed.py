@@ -76,7 +76,8 @@ def smooth_bm_dfm_fixed_params(
         P0_override=None,
     )
 
-    ss = StateSpaceParams(T=Tm, Q=Qm, C=C_meas, R=R_meas, a0=a0, P0=P0)
+    R_used = np.diag(R_meas).copy() if getattr(R_meas, "ndim", 0) == 2 else np.asarray(R_meas, dtype=float).copy()
+    ss = StateSpaceParams(T=Tm, Q=Qm, C=C_meas, R=R_used, a0=a0, P0=P0)
     kres = kalman_filter_smoother(Y, ss)
 
     # Match your BM “result naming” convention:

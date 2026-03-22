@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from typing import Literal, Tuple
+from typing import Literal, Optional, Sequence, Tuple
 
 import numpy as np
 
-from ..constraints import mm_sum_sq
+from ..blocks import normalize_blocks
+from ..constraints import mm_sum_sq, mm_weights
 from ..spec import BMDfmConfig
 from ..stability import enforce_var_stability
 from ..state_builder import BMParams
@@ -13,15 +14,7 @@ from ..toolbox_nanfill import dfm_remnans_spline_method2
 PcaFill = Literal["mean", "ffill", "toolbox_spline"]
 
 
-def _fill_for_pca(Y: np.ndarray, method: PcaFill) -> np.ndarray:
-    """
-    Fill NaNs for PCA initialization.
-
-    - mean: replace NaNs with column nan-mean (NaN-mean -> 0 if column all-NaN)
-    - ffill: forward-fill within each column, then fill remaining NaNs with column nan-mean
-    - toolbox_spline: toolbox-style spline fill + trimming is handled in init_params_pca
-      (this function is not used for toolbox_spline).
-    """
+def _fill_for_pca(Y: np.ndarray, method: Literal["mean", "ffill"]) -> np.ndarray:
     Y = np.asarray(Y, dtype=float)
     X = Y.copy()
 
@@ -46,35 +39,94 @@ def _fill_for_pca(Y: np.ndarray, method: PcaFill) -> np.ndarray:
         X[inds] = col_means[inds[1]]
         return X
 
-    raise ValueError(f"Unsupported pca_fill={method!r}")
+    raise ValueError(f"Unsupported fill method: {method!r}")
+
+
+def _svd_pca(X: np.ndarray, r: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    X = np.asarray(X, dtype=float)
+    Xc = X - X.mean(axis=0, keepdims=True)
+    U, S, Vt = np.linalg.svd(Xc, full_matrices=False)
+
+    r = int(r)
+    if r <= 0:
+        raise ValueError("r must be positive")
+
+    if min(U.shape[1], Vt.shape[0]) < r:
+        raise ValueError(
+            f"PCA rank r={r} exceeds available rank={min(U.shape[1], Vt.shape[0])}."
+        )
+
+    U_r = U[:, :r]
+    S_r = S[:r]
+    F = U_r * S_r
+    Lambda = Vt[:r, :].T
+    return U_r, S_r, F, Lambda
 
 
 def pca_init_factors(
     Y_monthly: np.ndarray, r_total: int, fill: Literal["mean", "ffill"]
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    PCA init on filled monthly panel.
-
-    Returns:
-      F0: (T, r_total) factor scores
-      Lambda0: (nM, r_total) loadings
-    """
     X = _fill_for_pca(Y_monthly, fill)
-    Xc = X - X.mean(axis=0, keepdims=True)
-
-    U, S, Vt = np.linalg.svd(Xc, full_matrices=False)
-    r = int(r_total)
-    r = max(1, min(r, U.shape[1]))
-
-    F0 = U[:, :r] * S[:r]
-    Lambda0 = Vt[:r, :].T
+    _, _, F0, Lambda0 = _svd_pca(X, r=int(r_total))
     return F0, Lambda0
 
 
+def block_pca_deflation_init(
+    Y_monthly_filled: np.ndarray,
+    *,
+    r_by_block: Sequence[int],
+    blocks_mask: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    X = np.asarray(Y_monthly_filled, dtype=float)
+    if X.ndim != 2:
+        raise ValueError("Y_monthly_filled must be 2D")
+
+    Tn, nM = X.shape
+
+    r_by_block = tuple(int(x) for x in r_by_block)
+    n_blocks = len(r_by_block)
+    if blocks_mask.shape != (int(nM), int(n_blocks)):
+        raise ValueError(
+            f"blocks_mask shape must be (nM, n_blocks)=({nM},{n_blocks}), got {blocks_mask.shape}."
+        )
+
+    r_total = int(sum(r_by_block))
+    if r_total <= 0:
+        raise ValueError("sum(r_by_block) must be positive")
+
+    X_res = X - X.mean(axis=0, keepdims=True)
+
+    F_list: list[np.ndarray] = []
+    Lambda_m0 = np.zeros((int(nM), int(r_total)), dtype=float)
+
+    cursor = 0
+    for b, rb in enumerate(r_by_block):
+        rb = int(rb)
+        if rb == 0:
+            continue
+
+        cols = np.where(blocks_mask[:, b] == 1)[0]
+        if cols.size == 0:
+            raise ValueError(f"Block {b} has rb={rb} but no monthly series assigned.")
+
+        Xb = X_res[:, cols]
+        U_r, S_r, F_b, Lambda_b = _svd_pca(Xb, r=rb)
+
+        Lambda_m0[cols, cursor:cursor + rb] = Lambda_b
+
+        X_res = X_res - (U_r @ (U_r.T @ X_res))
+
+        F_list.append(F_b)
+        cursor += rb
+
+    if cursor != int(r_total):
+        raise RuntimeError("Internal error: factor cursor mismatch.")
+
+    F0 = np.concatenate(F_list, axis=1) if len(F_list) else np.zeros((Tn, 0), dtype=float)
+    return F0, Lambda_m0
+
+
 def _fit_var_ols(F: np.ndarray, p: int) -> Tuple[list[np.ndarray], np.ndarray]:
-    """
-    OLS VAR(p) on factors F (T x r). Returns Phi_lags (list length p, each r x r) and Q (r x r).
-    """
     F = np.asarray(F, dtype=float)
     T, r = F.shape
     p = int(p)
@@ -102,25 +154,63 @@ def _fit_var_ols(F: np.ndarray, p: int) -> Tuple[list[np.ndarray], np.ndarray]:
     return Phi_lags, Q
 
 
+def _quarterly_regression_init(
+    *,
+    F0: np.ndarray,
+    y_q_nan: np.ndarray,
+    mm_style: str,
+) -> Tuple[np.ndarray, float]:
+    y_q_nan = np.asarray(y_q_nan, dtype=float).reshape(-1)
+    obs = np.where(np.isfinite(y_q_nan))[0]
+
+    if obs.size == 0 or F0.shape[1] == 0:
+        Lambda_q0 = np.zeros((1, int(F0.shape[1])), dtype=float)
+        if F0.shape[1] > 0:
+            Lambda_q0[0, 0] = 1.0
+        return Lambda_q0, 1.0
+
+    w = mm_weights(str(mm_style)).astype(float)
+    if w.shape != (5,):
+        raise ValueError("mm_weights must return shape (5,)")
+
+    obs = obs[obs >= 4]
+    if obs.size < int(F0.shape[1]):
+        Xq = F0[np.isfinite(y_q_nan), :]
+        yq = y_q_nan[np.isfinite(y_q_nan)]
+        if Xq.shape[0] >= Xq.shape[1]:
+            beta, *_ = np.linalg.lstsq(Xq, yq, rcond=None)
+            resid = yq - Xq @ beta
+            return beta.reshape(1, -1), float(np.nanvar(resid))
+        Lambda_q0 = np.zeros((1, int(F0.shape[1])), dtype=float)
+        Lambda_q0[0, 0] = 1.0
+        return Lambda_q0, 1.0
+
+    Xq = np.zeros((int(obs.size), int(F0.shape[1])), dtype=float)
+    for ii, t in enumerate(obs):
+        acc = np.zeros((int(F0.shape[1]),), dtype=float)
+        for k in range(5):
+            acc += float(w[k]) * F0[int(t - k), :]
+        Xq[ii, :] = acc
+
+    yq = y_q_nan[obs]
+
+    beta, *_ = np.linalg.lstsq(Xq, yq, rcond=None)
+    resid = yq - Xq @ beta
+    R_q0 = float(np.nanvar(resid))
+    return beta.reshape(1, -1), R_q0
+
+
 def init_params_pca(
     Y_scaled: np.ndarray,
     *,
     nM: int,
     config: BMDfmConfig,
+    blocks: Optional[np.ndarray] = None,
 ) -> BMParams:
-    """
-    Build a full BMParams initialization from PCA (and simple OLS for the factor VAR and quarterly loading).
-    Expects Y_scaled to be (T, nM + 1), with quarterly target in the last column (NaNs except quarter-ends).
-
-    If config.pca_fill == "toolbox_spline", we mimic toolbox initialization:
-      - DFM_remNaNs_spline method 2 with k=3 on the full X=[monthly, quarterly] matrix
-      - run PCA on the filled monthly block of the balanced sample
-      - use NaN pattern from the balanced sample when deciding which quarterly observations exist
-    """
     Y_scaled = np.asarray(Y_scaled, dtype=float)
     if Y_scaled.ndim != 2:
         raise ValueError("Y_scaled must be 2D (T, nM+1).")
-    if Y_scaled.shape[1] != nM + 1:
+    if Y_scaled.shape[1] != int(nM) + 1:
         raise ValueError(f"Expected Y_scaled.shape[1]==nM+1 ({nM+1}), got {Y_scaled.shape[1]}.")
 
     r_by_block = tuple(int(x) for x in config.r_by_block)
@@ -128,13 +218,24 @@ def init_params_pca(
     if r_total <= 0:
         raise ValueError("sum(r_by_block) must be > 0.")
 
-    # Toolbox convention: ppC = max(p, 5)
-    ppC = max(int(config.p), 5)
-
-    # Quarterly count (this implementation typically uses nQ=1, but state_builder expects vectors)
+    n_blocks = len(r_by_block)
     nQ = int(getattr(config, "n_quarterly", 1))
 
-    # Toolbox spline+trim path (balanced sample)
+    if blocks is None and getattr(config, "blocks", None) is not None:
+        blocks = normalize_blocks(
+            getattr(config, "blocks"),
+            nM=int(nM),
+            n_blocks=int(n_blocks),
+            nQ=int(nQ),
+        )
+
+    if blocks is not None and blocks.shape != (int(nM), int(n_blocks)):
+        raise ValueError(
+            f"blocks must have shape (nM, n_blocks)=({nM},{n_blocks}), got {blocks.shape}."
+        )
+
+    ppC = max(int(config.p), 5)
+
     if getattr(config, "pca_fill", "mean") == "toolbox_spline":
         k = int(getattr(config, "pca_spline_k", 3))
         frac = float(getattr(config, "pca_spline_trim_row_missing_frac", 0.8))
@@ -143,84 +244,78 @@ def init_params_pca(
         X_bal_filled = fill_res.X_bal_filled
         indNaN_bal = fill_res.indNaN_bal
 
-        # Create NaN-pattern version (like toolbox xNaN = xBal; xNaN(indNaN)=nan)
         X_bal_nan = X_bal_filled.copy()
         X_bal_nan[indNaN_bal] = np.nan
 
         Y_m_filled = X_bal_filled[:, :nM]
-        y_q_nan = X_bal_nan[:, nM]
         Y_m_nan = X_bal_nan[:, :nM]
+        y_q_nan = X_bal_nan[:, nM]
 
-        # PCA on filled monthly panel (balanced sample)
-        F0, Lambda_m0 = pca_init_factors(Y_m_filled, r_total=r_total, fill="mean")
-
+        if blocks is None:
+            F0, Lambda_m0 = pca_init_factors(Y_m_filled, r_total=r_total, fill="mean")
+        else:
+            F0, Lambda_m0 = block_pca_deflation_init(
+                Y_m_filled, r_by_block=r_by_block, blocks_mask=blocks
+            )
     else:
-        # Existing mean/ffill path on the original sample
         Y_m_nan = Y_scaled[:, :nM]
         y_q_nan = Y_scaled[:, nM]
-        F0, Lambda_m0 = pca_init_factors(Y_m_nan, r_total=r_total, fill=config.pca_fill)  # type: ignore
 
-    # Block split
-    blocks = []
+        Y_m_filled = _fill_for_pca(Y_m_nan, method=str(config.pca_fill))  # type: ignore[arg-type]
+
+        if blocks is None:
+            F0, Lambda_m0 = pca_init_factors(
+                Y_m_nan, r_total=r_total, fill=str(config.pca_fill)  # type: ignore[arg-type]
+            )
+        else:
+            F0, Lambda_m0 = block_pca_deflation_init(
+                Y_m_filled, r_by_block=r_by_block, blocks_mask=blocks
+            )
+
+    blocks_F: list[np.ndarray] = []
     s = 0
     for rb in r_by_block:
-        blocks.append(F0[:, s : s + rb])
-        s += rb
+        blocks_F.append(F0[:, s : s + int(rb)])
+        s += int(rb)
 
-    # VAR(p) per block
     Phi_blocks: list[list[np.ndarray]] = []
     Q_f_blocks: list[np.ndarray] = []
-    for bF in blocks:
+    for bF in blocks_F:
         Phi_lags, Qb = _fit_var_ols(bF, p=config.p)
         if config.force_var_stability and config.p > 0:
             Phi_lags = enforce_var_stability(
                 Phi_lags,
-                ppC=ppC,  # toolbox rule: max(p,5)
+                ppC=ppC,
                 shrink=config.var_stability_shrink,
                 max_iter=getattr(config, "var_stability_max_iter", 50),
             )
         Phi_blocks.append(Phi_lags)
         Q_f_blocks.append(Qb)
 
-    # Quarterly loading regression on contemporaneous factors at observed months
-    obs_q = np.isfinite(y_q_nan)
-    if obs_q.sum() >= r_total:
-        Xq = F0[obs_q, :]
-        yq = y_q_nan[obs_q]
-        beta, *_ = np.linalg.lstsq(Xq, yq, rcond=None)
-        Lambda_q0 = beta.reshape(1, -1)
-        yq_hat = Xq @ beta
-        R_q0 = float(np.nanvar(yq - yq_hat))
-    else:
-        Lambda_q0 = np.zeros((1, r_total), dtype=float)
-        Lambda_q0[0, 0] = 1.0
-        R_q0 = 1.0
+    Lambda_q0, R_q0 = _quarterly_regression_init(
+        F0=F0, y_q_nan=y_q_nan, mm_style=str(config.mm_weight_style)
+    )
 
-    # Quarterly measurement variance (vector, length nQ)
-    R_q0 = max(R_q0, float(config.quarterly_meas_var_floor))
-    R_diag_q0 = np.full(nQ, float(R_q0), dtype=float)
+    R_q0 = max(float(R_q0), float(config.quarterly_meas_var_floor))
+    R_diag_q0 = np.full(int(nQ), float(R_q0), dtype=float)
 
-    # Monthly measurement variance
     if config.idio_ar1:
-        R_m0 = np.full(nM, float(config.monthly_meas_var_floor), dtype=float)
+        R_m0 = np.full(int(nM), float(config.monthly_meas_var_floor), dtype=float)
     else:
         resid_m = Y_m_nan - (F0 @ Lambda_m0.T)
         R_m0 = np.nanvar(resid_m, axis=0)
         R_m0 = np.where(np.isfinite(R_m0), R_m0, float(config.monthly_meas_var_floor))
         R_m0 = np.maximum(R_m0, float(config.monthly_meas_var_floor))
 
-    # Idiosyncratic AR(1) init (monthly)
-    rho_m0 = np.full(nM, float(config.rho_idio_init), dtype=float)
-    sig2_m0 = np.full(nM, 1.0 - float(config.rho_idio_init) ** 2, dtype=float)
+    rho_m0 = np.full(int(nM), float(config.rho_idio_init), dtype=float)
+    sig2_m0 = np.full(int(nM), 1.0 - float(config.rho_idio_init) ** 2, dtype=float)
     sig2_m0 = np.maximum(sig2_m0, float(config.min_var))
 
-    # Quarterly idiosyncratic init (vectors, length nQ)
-    rho_q0 = np.zeros(nQ, dtype=float)
+    rho_q0 = np.zeros(int(nQ), dtype=float)
 
-    # Quarterly idio innovation variance scaling (/sum(w^2)=/19 in toolbox style)
     sig2_q_scalar = 1.0 / float(mm_sum_sq(config.mm_weight_style))
     sig2_q_scalar = max(sig2_q_scalar, float(config.min_var))
-    sig2_q0 = np.full(nQ, float(sig2_q_scalar), dtype=float)
+    sig2_q0 = np.full(int(nQ), float(sig2_q_scalar), dtype=float)
 
     return BMParams(
         Phi_blocks=Phi_blocks,

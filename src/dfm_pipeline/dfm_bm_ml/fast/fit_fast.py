@@ -3,14 +3,13 @@ from __future__ import annotations
 from typing import Optional
 
 import numpy as np
-
 from tqdm.auto import tqdm
 
 from .em_fast import EMStepCache, build_em_cache, em_step_ml_fast
 from .init import init_params_pca
-from ..scaling import PanelScaler, scale_panel
+from ..scaling import scale_panel
 from ..spec import BMDfmConfig
-from ..state_builder import BMParams, StateIndex, build_state_space
+from ..state_builder import BMParams, build_state_space
 from ..types import BMDfmResult
 
 
@@ -23,19 +22,26 @@ def _as_blocks_array(blocks: Optional[list[int]], nM: int) -> Optional[np.ndarra
     return arr
 
 
-def _converged(
-    loglik_trace: list[float],
-    tol: float,
-    mode: str,
-) -> bool:
+def _converged(loglik_trace: list[float], tol: float, mode: str) -> bool:
+    """
+    Additional stop criterion (in addition to max_iter):
+      - absolute_ll: |ll_k - ll_{k-1}| < tol
+      - toolbox_rel: |ll_k - ll_{k-1}| / max(1, |ll_{k-1}|) < tol
+    """
     if len(loglik_trace) < 2:
         return False
+
     ll_new = float(loglik_trace[-1])
     ll_old = float(loglik_trace[-2])
+    if (not np.isfinite(ll_new)) or (not np.isfinite(ll_old)):
+        return False
+
     d = ll_new - ll_old
+
     if mode == "absolute_ll":
         return abs(d) < tol
-    # toolbox_rel (default): relative improvement
+
+    # toolbox_rel (default)
     denom = max(1.0, abs(ll_old))
     return abs(d) / denom < tol
 
@@ -45,23 +51,11 @@ def fit_bm_dfm_fast(
     y_quarterly: Optional[np.ndarray] = None,
     config: Optional[BMDfmConfig] = None,
     *,
-    # Backward-compatible alias
-    X_monthly: Optional[np.ndarray] = None,
+    X_monthly: Optional[np.ndarray] = None,  # alias
     init_params: Optional[BMParams] = None,
     em_cache: Optional[EMStepCache] = None,
     verbose: bool = False,
 ) -> BMDfmResult:
-    """
-    Fast (non-numba) BM-DFM ML-EM fit.
-
-    Inputs:
-      - Y_monthly: (T, nM) monthly panel
-      - y_quarterly: (T,) quarterly target placed on quarter-end months (NaN elsewhere)
-
-    Notes:
-      - If config.scaling_mode == "external_frozen", inputs are assumed already standardized.
-      - Otherwise (internal_per_run/toolbox_vintage), nanmean/nanstd are computed once per call.
-    """
     if config is None:
         raise ValueError("config is required.")
     config.validate()
@@ -93,7 +87,7 @@ def fit_bm_dfm_fast(
     scale_mode = str(config.scaling_mode)
     if scale_mode == "toolbox_vintage":
         scale_mode = "internal_per_run"
-    Y, scaler = scale_panel(Y_raw, mode=scale_mode)  # default min_std is fine
+    Y, scaler = scale_panel(Y_raw, mode=scale_mode)
 
     blocks_arr = _as_blocks_array(config.blocks, nM)
 
@@ -110,7 +104,6 @@ def fit_bm_dfm_fast(
     if params is None:
         params = init_params_pca(Y, nM=nM, config=config)
 
-    # Optional future-proofing if you add these to BMDfmConfig later
     P0_mode = getattr(config, "P0_mode", "diffuse")
     update_initial_state = bool(getattr(config, "update_initial_state_each_iter", False))
 
@@ -172,11 +165,11 @@ def fit_bm_dfm_fast(
             a0_in = a0_next
             P0_in = P0_next
 
+        # Additional stop criterion: relative/absolute LL improvement
         if _converged(loglik_trace, tol=float(config.tol), mode=str(config.convergence_mode)):
             converged = True
             break
 
-    # Build final state-space matrices for the result container
     C, R, A, Q, a0, P0, state_index = build_state_space(
         params=params,
         nM=nM,

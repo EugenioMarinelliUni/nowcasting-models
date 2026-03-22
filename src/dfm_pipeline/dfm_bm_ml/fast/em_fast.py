@@ -143,7 +143,8 @@ def em_step_ml_fast(
         P0_override=P0_in,
     )
 
-    ss = StateSpaceParams(T=Tm, Q=Qm, C=C, R=R, a0=a0_used, P0=P0_used)
+    R_used = np.diag(R).copy() if getattr(R, "ndim", 0) == 2 else np.asarray(R, dtype=float).copy()
+    ss = StateSpaceParams(T=Tm, Q=Qm, C=C, R=R_used, a0=a0_used, P0=P0_used)
     res = kalman_filter_smoother(Y, ss)
 
     loglik = float(res.loglik)

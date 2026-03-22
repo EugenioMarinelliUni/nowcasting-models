@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Optional
 
 import numpy as np
-
 from tqdm.auto import tqdm
 
 from .em_fast_numba import EMStepCache, build_em_cache, em_step_ml_fast_numba
@@ -23,18 +22,26 @@ def _as_blocks_array(blocks: Optional[list[int]], nM: int) -> Optional[np.ndarra
     return arr
 
 
-def _converged(
-    loglik_trace: list[float],
-    tol: float,
-    mode: str,
-) -> bool:
+def _converged(loglik_trace: list[float], tol: float, mode: str) -> bool:
+    """
+    Additional stop criterion (in addition to max_iter):
+      - absolute_ll: |ll_k - ll_{k-1}| < tol
+      - toolbox_rel: |ll_k - ll_{k-1}| / max(1, |ll_{k-1}|) < tol
+    """
     if len(loglik_trace) < 2:
         return False
+
     ll_new = float(loglik_trace[-1])
     ll_old = float(loglik_trace[-2])
+    if (not np.isfinite(ll_new)) or (not np.isfinite(ll_old)):
+        return False
+
     d = ll_new - ll_old
+
     if mode == "absolute_ll":
         return abs(d) < tol
+
+    # toolbox_rel (default)
     denom = max(1.0, abs(ll_old))
     return abs(d) / denom < tol
 
@@ -44,17 +51,11 @@ def fit_bm_dfm_fast_numba(
     y_quarterly: Optional[np.ndarray] = None,
     config: Optional[BMDfmConfig] = None,
     *,
-    # Backward-compatible alias
-    X_monthly: Optional[np.ndarray] = None,
+    X_monthly: Optional[np.ndarray] = None,  # alias
     init_params: Optional[BMParams] = None,
     em_cache: Optional[EMStepCache] = None,
     verbose: bool = False,
 ) -> BMDfmResult:
-    """
-    Fast (Numba-accelerated) BM-DFM ML-EM fit.
-
-    Same interface and outputs as fit_bm_dfm_fast, but uses Numba kernels in the E/M steps.
-    """
     if config is None:
         raise ValueError("config is required.")
     config.validate()
@@ -164,6 +165,7 @@ def fit_bm_dfm_fast_numba(
             a0_in = a0_next
             P0_in = P0_next
 
+        # Additional stop criterion: relative/absolute LL improvement
         if _converged(loglik_trace, tol=float(config.tol), mode=str(config.convergence_mode)):
             converged = True
             break
