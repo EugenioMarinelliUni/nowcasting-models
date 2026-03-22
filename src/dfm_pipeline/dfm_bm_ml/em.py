@@ -94,7 +94,8 @@ def em_step_ml(
     )
 
     # Correct API for dfm_dyn.state_space_new: fields are C and R (not Z/H)
-    ss = StateSpaceParams(T=Tm, Q=Qm, C=C, R=R, a0=a0_used, P0=P0_used)
+    R_used = np.diag(R).copy() if getattr(R, "ndim", 0) == 2 else np.asarray(R, dtype=float).copy()
+    ss = StateSpaceParams(T=Tm, Q=Qm, C=C, R=R_used, a0=a0_used, P0=P0_used)
 
     # Correct return contract: KalmanSmootherResult object
     res = kalman_filter_smoother(Y, ss)

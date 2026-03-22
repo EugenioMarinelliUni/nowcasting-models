@@ -19,10 +19,12 @@ class BMDfmConfig:
     pca_spline_k: int = 3
     pca_spline_trim_row_missing_frac: float = 0.8
 
-    max_iter: int = 200
-    tol: float = 1e-6
-
+    # EM loop control
+    max_iter: int = 200          # hard cap (always enforced)
+    tol: float = 1e-6            # used by convergence criterion
     convergence_mode: Literal["absolute_ll", "toolbox_rel"] = "toolbox_rel"
+    # - absolute_ll: stop if |ll_k - ll_{k-1}| < tol
+    # - toolbox_rel: stop if |ll_k - ll_{k-1}| / max(1, |ll_{k-1}|) < tol
 
     rho_idio_init: float = 0.10
     idio_ar1: bool = True
