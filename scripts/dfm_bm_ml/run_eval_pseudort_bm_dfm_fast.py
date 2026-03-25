@@ -10,8 +10,8 @@ import pandas as pd
 
 from dfm_pipeline.dfm_bm_ml.fast.fit_fast import fit_bm_dfm_fast
 from dfm_pipeline.dfm_bm_ml.spec import BMDfmConfig
-from dfm_pipeline.eval_pseudort.bm_pseudort import PseudoRTEvalConfig
-from dfm_pipeline.eval_pseudort.fast import run_pseudo_rt_eval_fast
+from dfm_pipeline.eval_pseudort.fast.bm_pseudort_fast import EvalConfig as PseudoRTEvalConfig, run_pseudo_rt_eval_fast
+from dfm_pipeline.utils.threadpool import limit_blas_threads
 
 
 def _filter_kwargs_for_dataclass(cls: Any, kwargs: Dict[str, Any]) -> Dict[str, Any]:
@@ -100,10 +100,12 @@ def main() -> None:
     parser.add_argument("--gdp-rel", type=int, default=0)
 
     parser.add_argument("--warm-start", action="store_true")
-    parser.add_argument("--n-jobs", type=int, default=1)
     parser.add_argument("--blas-threads", type=int, default=1)
 
     args = parser.parse_args()
+
+    if int(args.blas_threads) > 0:
+        limit_blas_threads(int(args.blas_threads))
 
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
@@ -150,7 +152,7 @@ def main() -> None:
         delay_style=str(args.delay_style),
         delay_json=args.delay_json,
         gdp_rel=int(args.gdp_rel),
-        horizons=("bac", "now", "for"),
+        horizons=("now",),
     )
     eval_kwargs = _filter_kwargs_for_dataclass(PseudoRTEvalConfig, eval_kwargs)
     eval_cfg = PseudoRTEvalConfig(**eval_kwargs)
@@ -162,7 +164,6 @@ def main() -> None:
         model_config=model_config,
         eval_cfg=eval_cfg,
         warm_start=bool(args.warm_start),
-        n_jobs=int(args.n_jobs),
         blas_threads=int(args.blas_threads),
     )
 
@@ -181,7 +182,6 @@ def main() -> None:
         "model_config": model_kwargs,
         "eval_config": eval_kwargs,
         "warm_start": bool(args.warm_start),
-        "n_jobs": int(args.n_jobs),
         "blas_threads": int(args.blas_threads),
     }
     with open(outdir / "run_config.json", "w", encoding="utf-8") as f:

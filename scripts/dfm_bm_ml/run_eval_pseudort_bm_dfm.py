@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -9,12 +10,34 @@ import pandas as pd
 try:
     from dfm_pipeline.dfm_bm_ml import fit_bm_dfm
     from dfm_pipeline.dfm_bm_ml.spec import BMDfmConfig
-except ImportError:  # allow running without installing the package
+    from dfm_pipeline.dfm_bm_ml.state_builder import build_state_space
+    from dfm_pipeline.utils.threadpool import limit_blas_threads
+except ImportError:
     import sys
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
     from dfm_pipeline.dfm_bm_ml import fit_bm_dfm
     from dfm_pipeline.dfm_bm_ml.spec import BMDfmConfig
+    from dfm_pipeline.dfm_bm_ml.state_builder import build_state_space
+    from dfm_pipeline.utils.threadpool import limit_blas_threads
+
+
+def _rebuild_state_space(res: Any, config: Any, n_monthly: int, n_quarterly: int = 1):
+    return build_state_space(
+        params=res.params,
+        nM=int(n_monthly),
+        nQ=int(n_quarterly),
+        r_by_block=tuple(int(x) for x in getattr(config, "r_by_block")),
+        p=int(getattr(config, "p")),
+        ppC=int(getattr(config, "ppC", 5)),
+        mm_style=str(getattr(config, "mm_weight_style", "toolbox")),
+        quarterly_meas_var_floor=float(getattr(config, "quarterly_meas_var_floor", 1e-6)),
+        idio_ar1=bool(getattr(config, "idio_ar1", True)),
+        jitter=float(getattr(config, "jitter", 1e-8)),
+        P0_mode=str(getattr(config, "P0_mode", "diffuse")),
+        a0_override=None,
+        P0_override=None,
+    )
 
 
 def _parse_args() -> argparse.Namespace:
@@ -44,12 +67,16 @@ def _parse_args() -> argparse.Namespace:
 
     p.add_argument("--date_from", type=str, required=True)
     p.add_argument("--date_to", type=str, required=True)
+    p.add_argument("--blas_threads", type=int, default=1)
 
     return p.parse_args()
 
 
 def main() -> None:
     args = _parse_args()
+
+    if int(args.blas_threads) > 0:
+        limit_blas_threads(int(args.blas_threads))
 
     X = pd.read_csv(args.monthly_csv, index_col=0, parse_dates=True)
     yq = pd.read_csv(args.quarterly_csv, index_col=0, parse_dates=True).iloc[:, 0]
@@ -88,7 +115,18 @@ def main() -> None:
         Y_monthly = X.loc[mask].to_numpy(dtype=float)
         y_quarterly = yq.loc[mask].to_numpy(dtype=float)
 
-        res = fit_bm_dfm(Y_monthly=Y_monthly, y_quarterly=y_quarterly, config=config)
+        res = fit_bm_dfm(X_monthly=Y_monthly, y_quarterly=y_quarterly, config=config)
+        Tm, Qm, C_meas, R_meas, a0, P0, state_index = _rebuild_state_space(
+            res,
+            config=config,
+            n_monthly=Y_monthly.shape[1],
+            n_quarterly=1,
+        )
+
+        scaler = getattr(res, "scaler", None)
+        scaler_mu = np.asarray(getattr(scaler, "mu", np.zeros(Y_monthly.shape[1] + 1, dtype=float)), dtype=float)
+        scaler_sd = np.asarray(getattr(scaler, "sd", np.ones(Y_monthly.shape[1] + 1, dtype=float)), dtype=float)
+        scaler_mode = np.array([getattr(scaler, "mode", scaling_mode)], dtype=object)
 
         out_path = out_dir / f"bm_dfm_{dt.strftime('%Y-%m-%d')}.npz"
         np.savez_compressed(
@@ -97,17 +135,17 @@ def main() -> None:
             a_smooth=res.a_smooth,
             P_smooth=res.P_smooth,
             P_lag_smooth=res.P_lag_smooth,
-            T=res.T,
-            Q=res.Q,
-            C=res.C,
-            R=res.R,
-            a0=res.a0,
-            P0=res.P0,
-            scaler_mu=res.scaler.mu,
-            scaler_sd=res.scaler.sd,
-            scaler_mode=np.array([res.scaler.mode], dtype=object),
-            f_t_idx=res.f_t_idx,
-            f_stack_idx=res.f_stack_idx,
+            T=Tm,
+            Q=Qm,
+            C=C_meas,
+            R=R_meas,
+            a0=a0,
+            P0=P0,
+            scaler_mu=scaler_mu,
+            scaler_sd=scaler_sd,
+            scaler_mode=scaler_mode,
+            f_t_idx=state_index.f_t_idx,
+            f_stack_idx=state_index.f_stack_idx,
         )
 
 

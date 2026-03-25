@@ -9,6 +9,8 @@ from typing import Any, Callable, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from dfm_pipeline.utils.threadpool import limit_blas_threads
+
 
 # -----------------------------------------------------------------------------
 # Small utilities
@@ -21,7 +23,7 @@ def _normalize_month_start(idx: Any) -> pd.DatetimeIndex:
 
 def _month_in_quarter(dt: pd.Timestamp) -> int:
     m = int(pd.Timestamp(dt).month)
-    return ((m - 1) % 3) + 1  # 1,2,3
+    return ((m - 1) % 3) + 1
 
 
 def _quarter_end_month(dt: pd.Timestamp) -> pd.Timestamp:
@@ -68,6 +70,7 @@ def _to_attr(obj: Any, name: str) -> Any:
 
 def _call_supported(fn: Callable[..., Any], /, **kwargs: Any) -> Any:
     import inspect
+
     sig = inspect.signature(fn)
     supported = set(sig.parameters.keys())
     filt = {k: v for k, v in kwargs.items() if k in supported}
@@ -111,10 +114,6 @@ def _mask_quarterly_target_release(
     eval_date: pd.Timestamp,
     gdp_rel: int,
 ) -> pd.Series:
-    """
-    Mask quarterly target observations not yet released by eval_date.
-    If gdp_rel=1, quarter-end value becomes observable at quarter_end + 1 month.
-    """
     y = y.copy()
     if gdp_rel <= 0:
         return y
@@ -135,10 +134,6 @@ def _apply_quarter_end_leakage_guard(
     *,
     no_qe_leak: bool,
 ) -> pd.Series:
-    """
-    Prevent quarter-end leakage: at quarter-end month (moq=3), force y(eval_date)=NaN.
-    This ensures the m3 "nowcast" does not use the contemporaneous quarterly observation.
-    """
     if not no_qe_leak:
         return y
     t = pd.Timestamp(eval_date).to_period("M").to_timestamp(how="start")
@@ -157,11 +152,9 @@ def _extract_transition_and_measurement(res: Any, *, n_obs_expected: int) -> tup
     A = _squeeze_last(np.asarray(_to_attr(res, "A"), dtype=float))
     C = _squeeze_last(np.asarray(_to_attr(res, "C"), dtype=float))
 
-    # In this codebase: C is transition (square), A is measurement (n_obs x n_state)
     if _is_square(C) and A.ndim == 2 and A.shape[0] == n_obs_expected and A.shape[1] == C.shape[0]:
         return C, A
 
-    # Alternative naming if swapped:
     if _is_square(A) and C.ndim == 2 and C.shape[0] == n_obs_expected and C.shape[1] == A.shape[0]:
         return A, C
 
@@ -200,10 +193,6 @@ def _smooth_fixed_params(
     params_fixed: Any,
     model_config: Any,
 ):
-    """
-    Build BM state space from fixed params and run Kalman filter/smoother (no EM).
-    Returns a "result-like" object with .A (measurement), .C (transition), .a_smooth.
-    """
     from dfm_pipeline.dfm_bm_ml.state_builder import build_state_space
     from dfm_pipeline.dfm_dyn.state_space_new import kalman_filter, kalman_smoother
 
@@ -244,10 +233,10 @@ def _smooth_fixed_params(
     )
 
     try:
-        ks = kalman_smoother(kf)  # type: ignore[misc]
+        ks = kalman_smoother(kf)
     except TypeError:
         try:
-            ks = kalman_smoother(kf_res=kf)  # type: ignore[misc]
+            ks = kalman_smoother(kf_res=kf)
         except TypeError:
             ks = _call_supported(
                 kalman_smoother,
@@ -330,8 +319,12 @@ def run_pseudo_rt_eval_fast(
     fixed_params: bool = False,
     train_end: Optional[str] = None,
     train_max_iter: Optional[int] = None,
+    blas_threads: int | None = None,
 ) -> Tuple[pd.DataFrame, dict]:
     from tqdm.auto import tqdm
+
+    if blas_threads is not None and int(blas_threads) > 0:
+        limit_blas_threads(int(blas_threads))
 
     X_full = X_full.copy()
     X_full.index = _normalize_month_start(X_full.index)
@@ -349,6 +342,7 @@ def run_pseudo_rt_eval_fast(
     delay_map = None
     if getattr(eval_cfg, "delay_style", "none") == "json_map":
         import json
+
         if eval_cfg.delay_json is None:
             raise ValueError("delay_style=json_map requires delay_json")
         with open(eval_cfg.delay_json, "r", encoding="utf-8") as f:
@@ -656,6 +650,7 @@ def main(argv=None) -> int:
 
     ap.add_argument("--gdp_rel", type=int, default=0)
     ap.add_argument("--warm_start", action="store_true")
+    ap.add_argument("--blas_threads", type=int, default=1)
 
     ap.add_argument("--outdir", default="outputs/bm_pseudort_fast")
     ap.add_argument("--out_csv", default=None)
@@ -678,6 +673,9 @@ def main(argv=None) -> int:
     ap.add_argument("--no_qe_leak", action="store_true", help="Do not use quarter-end target observation at moq=3")
 
     args = ap.parse_args(argv)
+
+    if int(args.blas_threads) > 0:
+        limit_blas_threads(int(args.blas_threads))
 
     base = Path("dataset") / args.panel / args.dataset / args.tag
     panel_csv = base / "X_panel_z__bm.csv"
@@ -740,6 +738,7 @@ def main(argv=None) -> int:
         fixed_params=bool(args.fixed_params),
         train_end=args.train_end,
         train_max_iter=args.train_max_iter,
+        blas_threads=int(args.blas_threads),
     )
 
     outdir = Path(args.outdir)

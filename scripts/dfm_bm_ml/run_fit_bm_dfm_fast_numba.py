@@ -4,13 +4,15 @@ import argparse
 import json
 from dataclasses import fields, is_dataclass
 from pathlib import Path
-from typing import Any, Dict, Tuple, List
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
 
-from dfm_pipeline.dfm_bm_ml.spec import BMDfmConfig
 from dfm_pipeline.dfm_bm_ml.fast import fit_bm_dfm_fast_numba
+from dfm_pipeline.dfm_bm_ml.spec import BMDfmConfig
+from dfm_pipeline.dfm_bm_ml.state_builder import build_state_space
+from dfm_pipeline.utils.threadpool import limit_blas_threads
 
 
 def _filter_kwargs_for_dataclass(cls: Any, kwargs: Dict[str, Any]) -> Dict[str, Any]:
@@ -47,6 +49,24 @@ def _align_to_panel_index(
     idx = X.index
     y_aligned = y.reindex(idx)
     return X.to_numpy(dtype=float), y_aligned.to_numpy(dtype=float), list(X.columns), idx
+
+
+def _rebuild_state_space(res: Any, cfg: Any, n_monthly: int, n_quarterly: int = 1):
+    return build_state_space(
+        params=res.params,
+        nM=int(n_monthly),
+        nQ=int(n_quarterly),
+        r_by_block=tuple(int(x) for x in getattr(cfg, "r_by_block")),
+        p=int(getattr(cfg, "p")),
+        ppC=int(getattr(cfg, "ppC", 5)),
+        mm_style=str(getattr(cfg, "mm_weight_style", "toolbox")),
+        quarterly_meas_var_floor=float(getattr(cfg, "quarterly_meas_var_floor", 1e-6)),
+        idio_ar1=bool(getattr(cfg, "idio_ar1", True)),
+        jitter=float(getattr(cfg, "jitter", 1e-8)),
+        P0_mode=str(getattr(cfg, "P0_mode", "diffuse")),
+        a0_override=None,
+        P0_override=None,
+    )
 
 
 def main() -> None:
@@ -93,8 +113,12 @@ def main() -> None:
     ap.add_argument("--force-var-stability", dest="force_var_stability", action="store_true", default=True)
     ap.add_argument("--no-force-var-stability", dest="force_var_stability", action="store_false")
     ap.add_argument("--var-stability-shrink", default=0.98, type=float)
+    ap.add_argument("--blas-threads", default=1, type=int)
 
     args = ap.parse_args()
+
+    if int(args.blas_threads) > 0:
+        limit_blas_threads(int(args.blas_threads))
 
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
@@ -129,25 +153,34 @@ def main() -> None:
     cfg = BMDfmConfig(**model_kwargs)
 
     res = fit_bm_dfm_fast_numba(Y_monthly=X, y_quarterly=y, config=cfg)
+    Tm, Qm, C_meas, R_meas, a0, P0, state_index = _rebuild_state_space(res, cfg=cfg, n_monthly=X.shape[1], n_quarterly=1)
+
+    scaler = getattr(res, "scaler", None)
+    scaler_mu = np.asarray(getattr(scaler, "mu", np.zeros(X.shape[1] + 1, dtype=float)), dtype=float)
+    scaler_sd = np.asarray(getattr(scaler, "sd", np.ones(X.shape[1] + 1, dtype=float)), dtype=float)
+    scaler_mode = np.array([getattr(scaler, "mode", getattr(cfg, "scaling_mode", "external_frozen"))], dtype=object)
 
     npz_path = outdir / "bm_dfm_fit_fast_numba.npz"
     json_path = outdir / "bm_dfm_fit_fast_numba.json"
 
     np.savez_compressed(
         npz_path,
-        T=res.T,
-        Q=res.Q,
-        C=res.C,
-        R=res.R,
-        a0=res.a0,
-        P0=res.P0,
+        T=Tm,
+        Q=Qm,
+        C=C_meas,
+        R=R_meas,
+        a0=a0,
+        P0=P0,
         a_smooth=res.a_smooth,
         P_smooth=res.P_smooth,
         P_lag_smooth=res.P_lag_smooth,
-        f_t_idx=res.f_t_idx,
-        f_stack_idx=res.f_stack_idx,
+        f_t_idx=state_index.f_t_idx,
+        f_stack_idx=state_index.f_stack_idx,
         date_index=idx.astype("datetime64[ns]").values,
         x_columns=np.array(x_cols, dtype=object),
+        scaler_mu=scaler_mu,
+        scaler_sd=scaler_sd,
+        scaler_mode=scaler_mode,
     )
 
     meta = {
@@ -160,6 +193,7 @@ def main() -> None:
         "n_monthly": int(X.shape[1]),
         "config": model_kwargs,
         "loglik_trace": [float(v) for v in res.loglik_trace],
+        "blas_threads": int(args.blas_threads),
     }
     json_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
