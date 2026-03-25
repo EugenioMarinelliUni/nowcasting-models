@@ -196,6 +196,8 @@ def fit_bm_dfm_fast(
         R=R,
         A=A,
         Q=Q,
+        a0=a0,
+        P0=P0,
         state_index=state_index,
         scaler=scaler,
         config=config,

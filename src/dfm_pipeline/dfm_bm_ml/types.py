@@ -23,16 +23,18 @@ class BMDfmResult:
     params: BMParams
     loglik_trace: list[float]
 
-    # Core state outputs (present in your current implementation)
+    # Core state outputs
     a_smooth: Any
     P_smooth: Any
     P_lag_smooth: Any
 
-    # Measurement / transition matrices (names used in your project)
+    # Measurement / transition matrices
     C: Any
     R: Any
     A: Any
     Q: Any
+    a0: Any = None
+    P0: Any = None
 
     # Metadata + optional speedups
     state_index: Optional[StateIndex] = None
