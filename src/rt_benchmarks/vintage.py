@@ -1,37 +1,71 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
+
 import pandas as pd
 
+from dfm_pipeline.eval_pseudort.fast.vintage_api import (
+    apply_delay_mask_public,
+    apply_quarter_end_leakage_guard_public,
+    mask_quarterly_target_release_public,
+)
 
-@dataclass
+
+@dataclass(frozen=True)
 class VintageConfig:
     delay_style: str = "none"
-    delay_map: dict | None = None
+    delay_map: dict[str, int] | None = None
     gdp_rel: int = 0
     no_qe_leak: bool = True
+
+
+def _to_month_start(ts: Any) -> pd.Timestamp:
+    out = pd.Timestamp(ts)
+    if pd.isna(out):
+        raise ValueError("eval_date/index value cannot be NaT")
+    return out.to_period("M").to_timestamp(how="start")
+
+
+def _normalize_monthly_frame_index(X: pd.DataFrame) -> pd.DataFrame:
+    X = X.copy()
+    idx = pd.DatetimeIndex(pd.to_datetime(X.index))
+    if idx.hasnans:
+        raise ValueError("X index contains NaT values")
+    X.index = idx.to_period("M").to_timestamp(how="start")
+    X = X.sort_index()
+    return X
+
+
+def _normalize_monthly_series_index(y: pd.Series) -> pd.Series:
+    y = y.copy()
+    idx = pd.DatetimeIndex(pd.to_datetime(y.index))
+    if idx.hasnans:
+        raise ValueError("y index contains NaT values")
+    y.index = idx.to_period("M").to_timestamp(how="start")
+    y = y.sort_index()
+    return y
 
 
 def apply_delay_mask(
     X: pd.DataFrame,
     eval_date: pd.Timestamp,
     delay_style: str = "none",
-    delay_map: dict | None = None,
+    delay_map: dict[str, int] | None = None,
 ) -> pd.DataFrame:
-    Xv = X.loc[:pd.Timestamp(eval_date)].copy()
+    """
+    Return the monthly predictor vintage observable at eval_date.
+    """
+    eval_ms = _to_month_start(eval_date)
+    Xv = _normalize_monthly_frame_index(X)
+    Xv = Xv.loc[:eval_ms].copy()
 
-    if delay_style == "none" or delay_map is None:
-        return Xv
-
-    for col, delay in delay_map.items():
-        if col not in Xv.columns:
-            continue
-        if delay <= 0:
-            continue
-        masked_idx = Xv.index[Xv.index > (pd.Timestamp(eval_date) - pd.DateOffset(months=int(delay)))]
-        Xv.loc[masked_idx, col] = pd.NA
-
-    return Xv
+    return apply_delay_mask_public(
+        X=Xv,
+        eval_date=eval_ms,
+        delay_style=delay_style,
+        delay_map=delay_map,
+    )
 
 
 def mask_quarterly_target_release(
@@ -39,16 +73,18 @@ def mask_quarterly_target_release(
     eval_date: pd.Timestamp,
     gdp_rel: int,
 ) -> pd.Series:
-    yv = y.loc[:pd.Timestamp(eval_date)].copy()
+    """
+    Return the quarterly target vintage observable at eval_date.
+    """
+    eval_ms = _to_month_start(eval_date)
+    yv = _normalize_monthly_series_index(y)
+    yv = yv.loc[:eval_ms].copy()
 
-    if gdp_rel <= 0:
-        return yv
-
-    last_idx = yv.index.max() if len(yv.index) else None
-    if last_idx is not None and pd.Timestamp(eval_date) < (pd.Timestamp(last_idx) + pd.DateOffset(months=int(gdp_rel))):
-        yv.loc[last_idx] = pd.NA
-
-    return yv
+    return mask_quarterly_target_release_public(
+        y=yv,
+        eval_date=eval_ms,
+        gdp_rel=int(gdp_rel),
+    )
 
 
 def apply_quarter_end_leakage_guard(
@@ -56,17 +92,17 @@ def apply_quarter_end_leakage_guard(
     eval_date: pd.Timestamp,
     no_qe_leak: bool = True,
 ) -> pd.Series:
-    yv = y.copy()
-    d = pd.Timestamp(eval_date)
+    """
+    Apply the same quarter-end leakage guard as the DFM fast pseudo-RT code.
+    """
+    eval_ms = _to_month_start(eval_date)
+    yv = _normalize_monthly_series_index(y)
 
-    if not no_qe_leak:
-        return yv
-
-    is_quarter_end_month = d.month in (3, 6, 9, 12)
-    if is_quarter_end_month and d in yv.index:
-        yv.loc[d] = pd.NA
-
-    return yv
+    return apply_quarter_end_leakage_guard_public(
+        y=yv,
+        eval_date=eval_ms,
+        no_qe_leak=bool(no_qe_leak),
+    )
 
 
 def build_vintage_view(
@@ -75,20 +111,28 @@ def build_vintage_view(
     eval_date: pd.Timestamp,
     cfg: VintageConfig,
 ) -> tuple[pd.DataFrame, pd.Series]:
+    """
+    Build the pseudo-real-time information set available at eval_date.
+    """
+    eval_ms = _to_month_start(eval_date)
+
     Xv = apply_delay_mask(
-        X_full,
-        eval_date=eval_date,
+        X=X_full,
+        eval_date=eval_ms,
         delay_style=cfg.delay_style,
         delay_map=cfg.delay_map,
     )
+
     yv = mask_quarterly_target_release(
-        y_full,
-        eval_date=eval_date,
+        y=y_full,
+        eval_date=eval_ms,
         gdp_rel=cfg.gdp_rel,
     )
+
     yv = apply_quarter_end_leakage_guard(
-        yv,
-        eval_date=eval_date,
+        y=yv,
+        eval_date=eval_ms,
         no_qe_leak=cfg.no_qe_leak,
     )
+
     return Xv, yv
