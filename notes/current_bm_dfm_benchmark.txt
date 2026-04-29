@@ -1,0 +1,17 @@
+Current BM-DFM benchmark
+
+Model:
+- new specification
+- r = 2
+- p = 1
+- max_iter = 20
+
+Evaluation:
+- aligned target file = dataset/1960_noVIX/baseline/train1960_2015/y_target_z__bm_monthly.csv
+- window = 2016-01-01 to 2019-12-01
+
+Historical baseline:
+- old specification
+- r = 1
+- p = 2
+- max_iter = 20
