@@ -5,6 +5,8 @@ from typing import Optional
 import numpy as np
 from tqdm.auto import tqdm
 
+from dfm_pipeline.dfm_dyn.state_space import StateSpaceParams, kalman_filter_smoother
+
 from .em_fast_numba import EMStepCache, build_em_cache, em_step_ml_fast_numba
 from .init import init_params_pca as init_params_pca_legacy
 from .init_toolbox import init_params_pca_toolbox
@@ -42,6 +44,57 @@ def _initialize_params(Y: np.ndarray, nM: int, config: BMDfmConfig) -> BMParams:
     if method in {"toolbox_spline", "linear_interp", "legacy_mean", "legacy_ffill"}:
         return init_params_pca_toolbox(Y, nM=nM, config=config)
     return init_params_pca_legacy(Y, nM=nM, config=config)
+
+
+
+def _kalman_R_from_measurement_covariance(R: np.ndarray) -> np.ndarray:
+    """Return R in the representation preferred by the Kalman backend.
+
+    The public BM-DFM matrix API stores R as a full measurement covariance
+    matrix. The current BM specification uses diagonal measurement noise, and
+    the Kalman implementation has a faster path when R is supplied as a
+    one-dimensional vector of diagonal variances. Preserve a full matrix only
+    if a future specification introduces non-zero off-diagonal covariances.
+    """
+    R_arr = np.asarray(R, dtype=float)
+    if R_arr.ndim == 1:
+        return R_arr.copy()
+    if R_arr.ndim != 2 or R_arr.shape[0] != R_arr.shape[1]:
+        raise ValueError(f"R must be a vector or a square matrix, got shape {R_arr.shape}.")
+
+    diag = np.diag(R_arr).copy()
+    off_diag = R_arr - np.diag(diag)
+    if np.allclose(off_diag, 0.0):
+        return diag
+    return R_arr.copy()
+
+
+def _smooth_with_final_parameters(
+    Y: np.ndarray,
+    *,
+    A: np.ndarray,
+    Q: np.ndarray,
+    C: np.ndarray,
+    R: np.ndarray,
+    a0: np.ndarray,
+    P0: np.ndarray,
+):
+    """Run the post-EM Kalman smoother using the final parameter matrices.
+
+    EM iterations return smoothed states produced by the E-step under the
+    previous parameter values. After the final M-step, the matrices in `params`
+    have changed. This final smoother makes the returned states consistent with
+    the returned final A/Q/C/R/a0/P0. No additional M-step is performed.
+    """
+    ss = StateSpaceParams(
+        T=np.asarray(A, dtype=float),
+        Q=np.asarray(Q, dtype=float),
+        C=np.asarray(C, dtype=float),
+        R=_kalman_R_from_measurement_covariance(R),
+        a0=np.asarray(a0, dtype=float),
+        P0=np.asarray(P0, dtype=float),
+    )
+    return kalman_filter_smoother(np.asarray(Y, dtype=float), ss)
 
 
 def fit_bm_dfm_fast_numba(
@@ -181,12 +234,22 @@ def fit_bm_dfm_fast_numba(
         P0_override=P0_in,
     )
 
+    final_smooth = _smooth_with_final_parameters(
+        Y,
+        A=A,
+        Q=Q,
+        C=C,
+        R=R,
+        a0=a0,
+        P0=P0,
+    )
+
     return BMDfmResult(
         params=params,
         loglik_trace=loglik_trace,
-        a_smooth=a_smooth,
-        P_smooth=P_smooth,
-        P_lag_smooth=P_lag_smooth,
+        a_smooth=final_smooth.a_smooth,
+        P_smooth=final_smooth.P_smooth,
+        P_lag_smooth=final_smooth.P_lag_smooth,
         C=C,
         R=R,
         A=A,
