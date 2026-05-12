@@ -27,8 +27,7 @@ def _read_panel_csv(path: Path, date_col: str = "sasdate") -> pd.DataFrame:
     if date_col not in df.columns:
         raise ValueError(f"Panel CSV missing date column {date_col!r}. Columns: {list(df.columns)[:10]} ...")
     df[date_col] = pd.to_datetime(df[date_col])
-    df = df.sort_values(date_col).set_index(date_col)
-    return df
+    return df.sort_values(date_col).set_index(date_col)
 
 
 def _read_target_csv(path: Path, target_col: str, date_col: str = "sasdate") -> pd.Series:
@@ -38,14 +37,10 @@ def _read_target_csv(path: Path, target_col: str, date_col: str = "sasdate") -> 
     if target_col not in df.columns:
         raise ValueError(f"Target CSV missing target column {target_col!r}. Columns: {list(df.columns)[:10]} ...")
     df[date_col] = pd.to_datetime(df[date_col])
-    df = df.sort_values(date_col).set_index(date_col)
-    return df[target_col].astype(float)
+    return df.sort_values(date_col).set_index(date_col)[target_col].astype(float)
 
 
-def _align_to_panel_index(
-    X: pd.DataFrame,
-    y: pd.Series,
-) -> Tuple[np.ndarray, np.ndarray, List[str], pd.DatetimeIndex]:
+def _align_to_panel_index(X: pd.DataFrame, y: pd.Series) -> Tuple[np.ndarray, np.ndarray, List[str], pd.DatetimeIndex]:
     idx = X.index
     y_aligned = y.reindex(idx)
     return X.to_numpy(dtype=float), y_aligned.to_numpy(dtype=float), list(X.columns), idx
@@ -71,50 +66,53 @@ def _rebuild_state_space(res: Any, cfg: Any, n_monthly: int, n_quarterly: int = 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-
     ap.add_argument("--panel-csv", required=True, type=str)
     ap.add_argument("--target-csv", required=True, type=str)
     ap.add_argument("--target-col", required=True, type=str)
     ap.add_argument("--outdir", required=True, type=str)
-
     ap.add_argument("--date-col", default="sasdate", type=str)
-
     ap.add_argument("--r", required=True, type=int)
     ap.add_argument("--p", required=True, type=int)
-
     ap.add_argument("--mm-style", default="toolbox", choices=["toolbox", "scaled"])
     ap.add_argument("--pca-fill", default="mean", choices=["mean", "ffill"])
-
+    ap.add_argument(
+        "--init-missing-method",
+        default="toolbox_spline",
+        choices=["legacy_mean", "legacy_ffill", "toolbox_spline", "linear_interp"],
+    )
     ap.add_argument("--max-iter", default=200, type=int)
     ap.add_argument("--tol", default=1e-6, type=float)
-
     ap.add_argument("--rho-idio-init", default=0.10, type=float)
     ap.add_argument("--min-var", default=1e-8, type=float)
     ap.add_argument("--jitter", default=1e-12, type=float)
-
     ap.add_argument("--monthly-meas-var-floor", default=1e-4, type=float)
     ap.add_argument("--quarterly-meas-var-floor", default=1e-4, type=float)
-
-    ap.add_argument("--scaling-mode", default="external_frozen", choices=["external_frozen", "internal_per_run"])
-
+    ap.add_argument(
+        "--scaling-mode",
+        default="external_frozen",
+        choices=["external_frozen", "internal_per_run", "toolbox_vintage"],
+    )
     ap.add_argument("--idio-ar1", dest="idio_ar1", action="store_true", default=True)
     ap.add_argument("--no-idio-ar1", dest="idio_ar1", action="store_false")
-
     ap.add_argument("--enforce-quarterly-loading-constraint", action="store_true", default=True)
     ap.add_argument(
         "--no-enforce-quarterly-loading-constraint",
         dest="enforce_quarterly_loading_constraint",
         action="store_false",
     )
-
     ap.add_argument("--fix-quarterly-R", action="store_true", default=True)
     ap.add_argument("--no-fix-quarterly-R", dest="fix_quarterly_R", action="store_false")
-
     ap.add_argument("--force-var-stability", dest="force_var_stability", action="store_true", default=True)
     ap.add_argument("--no-force-var-stability", dest="force_var_stability", action="store_false")
     ap.add_argument("--var-stability-shrink", default=0.98, type=float)
+    ap.add_argument(
+        "--P0-mode",
+        default="steady_state",
+        choices=["diffuse", "steady_state", "steady_state_factor_diffuse_idio"],
+    )
+    ap.add_argument("--update-initial-state-each-iter", dest="update_initial_state_each_iter", action="store_true", default=True)
+    ap.add_argument("--no-update-initial-state-each-iter", dest="update_initial_state_each_iter", action="store_false")
     ap.add_argument("--blas-threads", default=1, type=int)
-
     args = ap.parse_args()
 
     if int(args.blas_threads) > 0:
@@ -125,7 +123,6 @@ def main() -> None:
 
     X_df = _read_panel_csv(Path(args.panel_csv), date_col=args.date_col)
     y_s = _read_target_csv(Path(args.target_csv), target_col=args.target_col, date_col=args.date_col)
-
     X, y, x_cols, idx = _align_to_panel_index(X_df, y_s)
 
     model_kwargs: Dict[str, Any] = dict(
@@ -135,6 +132,7 @@ def main() -> None:
         n_quarterly=1,
         mm_weight_style=str(args.mm_style),
         pca_fill=str(args.pca_fill),
+        init_missing_method=str(args.init_missing_method),
         max_iter=int(args.max_iter),
         tol=float(args.tol),
         rho_idio_init=float(args.rho_idio_init),
@@ -148,6 +146,8 @@ def main() -> None:
         fix_quarterly_R=bool(args.fix_quarterly_R),
         force_var_stability=bool(args.force_var_stability),
         var_stability_shrink=float(args.var_stability_shrink),
+        P0_mode=str(args.P0_mode),
+        update_initial_state_each_iter=bool(args.update_initial_state_each_iter),
     )
     model_kwargs = _filter_kwargs_for_dataclass(BMDfmConfig, model_kwargs)
     cfg = BMDfmConfig(**model_kwargs)
