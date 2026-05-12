@@ -19,9 +19,7 @@ def extract_midas_features(
     if len(x) < n_monthly_lags or len(y) < n_y_lags:
         return None
 
-    out = {
-        "predictor": predictor,
-    }
+    out = {}
 
     xlags = x.iloc[-n_monthly_lags:][::-1]
     ylags = y.iloc[-n_y_lags:][::-1]
