@@ -1,84 +1,88 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Literal
+from dataclasses import dataclass, field
+from typing import Optional, Sequence
 
 
 @dataclass
 class BMDfmConfig:
-    r_by_block: tuple[int, ...] = (4,)
-    p: int = 1
-    blocks: list[int] | None = None
+    r_by_block: Sequence[int]
+    p: int
 
+    blocks: Optional[list[int]] = None
     n_quarterly: int = 1
+    ppC: int = 5
 
-    mm_weight_style: Literal["toolbox", "scaled"] = "toolbox"
+    mm_weight_style: str = "toolbox"
+    pca_fill: str = "mean"
+    init_missing_method: str = "toolbox_spline"
 
-    # PCA init
-    pca_fill: Literal["mean", "ffill", "toolbox_spline"] = "mean"
-    pca_spline_k: int = 3
-    pca_spline_trim_row_missing_frac: float = 0.8
-
-    # EM loop control
-    max_iter: int = 200          # hard cap (always enforced)
-    tol: float = 1e-6            # used by convergence criterion
-    convergence_mode: Literal["absolute_ll", "toolbox_rel"] = "toolbox_rel"
-    # - absolute_ll: stop if |ll_k - ll_{k-1}| < tol
-    # - toolbox_rel: stop if |ll_k - ll_{k-1}| / max(1, |ll_{k-1}|) < tol
+    max_iter: int = 200
+    tol: float = 1e-6
+    convergence_mode: str = "toolbox_rel"
 
     rho_idio_init: float = 0.10
-    idio_ar1: bool = True
-
-    # Initial state covariance (P0)
-    P0_mode: Literal["diffuse", "steady_state"] = "diffuse"
-
     min_var: float = 1e-8
     jitter: float = 1e-12
 
     monthly_meas_var_floor: float = 1e-4
     quarterly_meas_var_floor: float = 1e-4
 
-    scaling_mode: Literal["external_frozen", "internal_per_run", "toolbox_vintage"] = "internal_per_run"
-
+    scaling_mode: str = "external_frozen"
+    idio_ar1: bool = True
     enforce_quarterly_loading_constraint: bool = True
     fix_quarterly_R: bool = True
 
     force_var_stability: bool = True
     var_stability_shrink: float = 0.98
-    var_stability_max_iter: int = 50
+
+    # Econometric-spec options
+    P0_mode: str = "steady_state"
+    update_initial_state_each_iter: bool = True
 
     def validate(self) -> None:
+        if not self.r_by_block:
+            raise ValueError("r_by_block must be non-empty.")
+        if any(int(r) <= 0 for r in self.r_by_block):
+            raise ValueError("All entries of r_by_block must be positive integers.")
+        if int(self.p) <= 0:
+            raise ValueError("p must be a positive integer.")
         if int(self.n_quarterly) != 1:
-            raise ValueError("BM-DFM implementation expects n_quarterly=1 (single quarterly target).")
+            raise ValueError("This BM-DFM implementation expects n_quarterly == 1.")
+        if int(self.ppC) < 5:
+            raise ValueError("ppC must be at least 5 for the Mariano-Murasawa quarterly stack.")
 
-        if self.scaling_mode not in ("external_frozen", "internal_per_run", "toolbox_vintage"):
-            raise ValueError(f"Unknown scaling_mode={self.scaling_mode!r}.")
-
-        if self.enforce_quarterly_loading_constraint and self.mm_weight_style != "toolbox":
+        if self.mm_weight_style not in {"toolbox", "scaled"}:
+            raise ValueError("mm_weight_style must be 'toolbox' or 'scaled'.")
+        if self.pca_fill not in {"mean", "ffill"}:
+            raise ValueError("pca_fill must be 'mean' or 'ffill'.")
+        if self.init_missing_method not in {"legacy_mean", "legacy_ffill", "toolbox_spline", "linear_interp"}:
             raise ValueError(
-                "enforce_quarterly_loading_constraint=True requires mm_weight_style='toolbox' "
-                "(toolbox proportional loading constraint assumes integer MM weights)."
+                "init_missing_method must be one of: legacy_mean, legacy_ffill, toolbox_spline, linear_interp."
             )
 
-        if self.convergence_mode not in ("absolute_ll", "toolbox_rel"):
-            raise ValueError(f"Unknown convergence_mode={self.convergence_mode!r}.")
+        if self.scaling_mode not in {"external_frozen", "internal_per_run", "toolbox_vintage"}:
+            raise ValueError(
+                "scaling_mode must be one of: external_frozen, internal_per_run, toolbox_vintage."
+            )
+        if self.convergence_mode not in {"absolute_ll", "toolbox_rel"}:
+            raise ValueError("convergence_mode must be 'absolute_ll' or 'toolbox_rel'.")
+        if self.P0_mode not in {"diffuse", "steady_state", "steady_state_factor_diffuse_idio"}:
+            raise ValueError(
+                "P0_mode must be one of: diffuse, steady_state, steady_state_factor_diffuse_idio."
+            )
 
-        if self.P0_mode not in ("diffuse", "steady_state"):
-            raise ValueError(f"Unknown P0_mode={self.P0_mode!r}.")
+        if float(self.min_var) <= 0.0:
+            raise ValueError("min_var must be strictly positive.")
+        if float(self.monthly_meas_var_floor) <= 0.0:
+            raise ValueError("monthly_meas_var_floor must be strictly positive.")
+        if float(self.quarterly_meas_var_floor) <= 0.0:
+            raise ValueError("quarterly_meas_var_floor must be strictly positive.")
+        if not (0.0 < float(self.var_stability_shrink) <= 1.0):
+            raise ValueError("var_stability_shrink must lie in (0, 1].")
 
-        if self.pca_fill not in ("mean", "ffill", "toolbox_spline"):
-            raise ValueError(f"Unknown pca_fill={self.pca_fill!r}.")
+        if self.blocks is not None and len(self.blocks) == 0:
+            raise ValueError("blocks must be None or a non-empty list[int].")
 
-        if self.pca_spline_k < 0:
-            raise ValueError("pca_spline_k must be >= 0.")
 
-        if not (0.0 < self.pca_spline_trim_row_missing_frac <= 1.0):
-            raise ValueError("pca_spline_trim_row_missing_frac must be in (0,1].")
-
-        if self.max_iter <= 0:
-            raise ValueError("max_iter must be positive.")
-        if self.tol <= 0:
-            raise ValueError("tol must be positive.")
-
-        if self.force_var_stability and not (0.0 < self.var_stability_shrink < 1.0):
-            raise ValueError("var_stability_shrink must be in (0,1) when force_var_stability=True.")
+__all__ = ["BMDfmConfig"]

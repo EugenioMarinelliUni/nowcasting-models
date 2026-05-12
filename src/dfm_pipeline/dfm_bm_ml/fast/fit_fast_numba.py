@@ -6,7 +6,8 @@ import numpy as np
 from tqdm.auto import tqdm
 
 from .em_fast_numba import EMStepCache, build_em_cache, em_step_ml_fast_numba
-from .init import init_params_pca
+from .init import init_params_pca as init_params_pca_legacy
+from .init_toolbox import init_params_pca_toolbox
 from ..scaling import scale_panel
 from ..spec import BMDfmConfig
 from ..state_builder import BMParams, build_state_space
@@ -23,27 +24,24 @@ def _as_blocks_array(blocks: Optional[list[int]], nM: int) -> Optional[np.ndarra
 
 
 def _converged(loglik_trace: list[float], tol: float, mode: str) -> bool:
-    """
-    Additional stop criterion (in addition to max_iter):
-      - absolute_ll: |ll_k - ll_{k-1}| < tol
-      - toolbox_rel: |ll_k - ll_{k-1}| / max(1, |ll_{k-1}|) < tol
-    """
     if len(loglik_trace) < 2:
         return False
-
     ll_new = float(loglik_trace[-1])
     ll_old = float(loglik_trace[-2])
     if (not np.isfinite(ll_new)) or (not np.isfinite(ll_old)):
         return False
-
     d = ll_new - ll_old
-
     if mode == "absolute_ll":
         return abs(d) < tol
-
-    # toolbox_rel (default)
     denom = max(1.0, abs(ll_old))
     return abs(d) / denom < tol
+
+
+def _initialize_params(Y: np.ndarray, nM: int, config: BMDfmConfig) -> BMParams:
+    method = str(getattr(config, "init_missing_method", "legacy_mean"))
+    if method in {"toolbox_spline", "linear_interp", "legacy_mean", "legacy_ffill"}:
+        return init_params_pca_toolbox(Y, nM=nM, config=config)
+    return init_params_pca_legacy(Y, nM=nM, config=config)
 
 
 def fit_bm_dfm_fast_numba(
@@ -51,7 +49,7 @@ def fit_bm_dfm_fast_numba(
     y_quarterly: Optional[np.ndarray] = None,
     config: Optional[BMDfmConfig] = None,
     *,
-    X_monthly: Optional[np.ndarray] = None,  # alias
+    X_monthly: Optional[np.ndarray] = None,
     init_params: Optional[BMParams] = None,
     em_cache: Optional[EMStepCache] = None,
     verbose: bool = False,
@@ -102,9 +100,9 @@ def fit_bm_dfm_fast_numba(
 
     params = init_params
     if params is None:
-        params = init_params_pca(Y, nM=nM, config=config)
+        params = _initialize_params(Y, nM=nM, config=config)
 
-    P0_mode = getattr(config, "P0_mode", "diffuse")
+    P0_mode = str(getattr(config, "P0_mode", "diffuse"))
     update_initial_state = bool(getattr(config, "update_initial_state_each_iter", False))
 
     a0_in = None
@@ -137,14 +135,14 @@ def fit_bm_dfm_fast_numba(
             nQ=nQ,
             r_by_block=tuple(int(x) for x in config.r_by_block),
             p=int(config.p),
-            ppC=5,
+            ppC=int(getattr(config, "ppC", 5)),
             mm_style=str(config.mm_weight_style),
             quarterly_meas_var_floor=float(config.quarterly_meas_var_floor),
             monthly_meas_var_floor=float(config.monthly_meas_var_floor),
             idio_ar1=bool(config.idio_ar1),
             force_var_stability=bool(config.force_var_stability),
             var_stability_shrink=float(config.var_stability_shrink),
-            P0_mode=str(P0_mode),
+            P0_mode=P0_mode,
             a0_in=a0_in,
             P0_in=P0_in,
             update_initial_state=update_initial_state,
@@ -157,15 +155,11 @@ def fit_bm_dfm_fast_numba(
         )
 
         loglik_trace.append(float(loglik))
-
         if verbose:
             it_iter.set_postfix(ll=float(loglik), refresh=False)
-
         if update_initial_state:
             a0_in = a0_next
             P0_in = P0_next
-
-        # Additional stop criterion: relative/absolute LL improvement
         if _converged(loglik_trace, tol=float(config.tol), mode=str(config.convergence_mode)):
             converged = True
             break
@@ -176,12 +170,12 @@ def fit_bm_dfm_fast_numba(
         nQ=nQ,
         r_by_block=tuple(int(x) for x in config.r_by_block),
         p=int(config.p),
-        ppC=5,
+        ppC=int(getattr(config, "ppC", 5)),
         mm_style=str(config.mm_weight_style),
         quarterly_meas_var_floor=float(config.quarterly_meas_var_floor),
         idio_ar1=bool(config.idio_ar1),
         jitter=float(config.jitter),
-        P0_mode=str(P0_mode),
+        P0_mode=P0_mode,
         a0_override=a0_in,
         P0_override=P0_in,
     )

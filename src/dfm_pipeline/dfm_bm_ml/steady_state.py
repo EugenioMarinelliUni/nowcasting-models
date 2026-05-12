@@ -1,35 +1,41 @@
 from __future__ import annotations
 
 import numpy as np
+from scipy.linalg import solve_discrete_lyapunov
 
 
-def safe_sym(A: np.ndarray) -> np.ndarray:
-    return 0.5 * (A + A.T)
+def safe_sym(M: np.ndarray) -> np.ndarray:
+    M = np.asarray(M, dtype=float)
+    return 0.5 * (M + M.T)
 
 
-def steady_state_cov(A: np.ndarray, Q: np.ndarray, jitter: float = 1e-12) -> np.ndarray:
+def project_psd(M: np.ndarray, eps: float = 1e-10) -> np.ndarray:
+    M = safe_sym(M)
+    vals, vecs = np.linalg.eigh(M)
+    vals = np.maximum(vals, eps)
+    return safe_sym((vecs * vals) @ vecs.T)
+
+
+def unconditional_covariance(T: np.ndarray, Q: np.ndarray, jitter: float = 1e-10) -> np.ndarray:
     """
-    Solve for the unconditional covariance V of a stable linear system:
-        x_t = A x_{t-1} + u_t,   u_t ~ (0, Q)
-    V solves:  V = A V A' + Q
-
-    Vectorized solution:
-        vec(V) = (I - A ⊗ A)^{-1} vec(Q)
-
-    Notes:
-    - Assumes A is stable; if not, the solution may be non-finite or ill-conditioned.
-    - Adds `jitter` to the linear system for numerical stability.
+    Solve P = T P T' + Q and project the result back to the PSD cone.
+    This is the closest thing to the toolbox-style unconditional initialization
+    without rewriting the whole BM state builder.
     """
-    n = A.shape[0]
-    if A.shape != (n, n):
-        raise ValueError("A must be square.")
-    if Q.shape != (n, n):
-        raise ValueError("Q must have same shape as A.")
+    T = np.asarray(T, dtype=float)
+    Q = safe_sym(np.asarray(Q, dtype=float))
+    try:
+        P = solve_discrete_lyapunov(T, Q)
+    except Exception:
+        # Fallback fixed-point iteration for near-singular cases.
+        P = Q.copy()
+        for _ in range(500):
+            P_new = safe_sym(T @ P @ T.T + Q)
+            if np.max(np.abs(P_new - P)) < 1e-10:
+                P = P_new
+                break
+            P = P_new
+    return project_psd(P, eps=max(jitter, 1e-12))
 
-    K = np.eye(n * n, dtype=float) - np.kron(A, A)
-    if jitter > 0.0:
-        K = K + np.eye(n * n, dtype=float) * jitter
 
-    v = np.linalg.solve(K, Q.reshape(-1, order="F"))
-    V = v.reshape((n, n), order="F")
-    return safe_sym(V)
+__all__ = ["safe_sym", "project_psd", "unconditional_covariance"]
