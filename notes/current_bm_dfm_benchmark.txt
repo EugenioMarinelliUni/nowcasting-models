@@ -1,17 +1,45 @@
 Current BM-DFM benchmark
 
-Model:
-- new specification
-- r = 2
-- p = 1
-- max_iter = 20
+Specification:
+- implementation: new econometric specification
+- r: 2
+- p: 1
+- max_iter: 10
+- mm_weight_style: toolbox
+- init_missing_method: toolbox_spline
+- P0_mode: steady_state
+- update_initial_state_each_iter: true
+- enforce_quarterly_loading_constraint: true
+- fix_quarterly_R: true
+- no_qe_leak: true
+- scaling_mode: external_frozen
+- BLAS threads: 1
+- state-space implementation: new
 
 Evaluation:
-- aligned target file = dataset/1960_noVIX/baseline/train1960_2015/y_target_z__bm_monthly.csv
-- window = 2016-01-01 to 2019-12-01
+- panel: 1960_noVIX
+- tag: train1960_2015
+- target file: y_target_z__bm_monthly.csv
+- evaluation window: 2016-01-01 to 2019-12-01
 
-Historical baseline:
-- old specification
-- r = 1
-- p = 2
-- max_iter = 20
+Metrics:
+- runtime_sec: 2528.875
+- runtime_min: 42.147917
+- pooled_rmse: 0.318425
+- m1_rmse: 0.331956
+- m2_rmse: 0.307442
+- m3_rmse: 0.315387
+- directional_accuracy: 0.600000
+
+Alternative fast/RMSE-oriented setting:
+- r: 2
+- p: 1
+- max_iter: 5
+- runtime_min: 34.462500
+- pooled_rmse: 0.316175
+- m3_rmse: 0.313791
+- directional_accuracy: 0.533333
+
+Rejected settings:
+- max_iter=20: dominated by max_iter=10 because it is slower, has worse RMSE, and same DA.
+- r=3,p=1: worse RMSE and worse DA than r=2,p=1.
