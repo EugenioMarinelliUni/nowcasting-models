@@ -13,8 +13,8 @@ if str(SRC_DIR) not in sys.path:
 
 import pandas as pd
 
-from qrf_pipeline import QRFConfig
-from qrf_pipeline.pseudort import QRFPseudoRTConfig, run_qrf_pseudort
+from qrf_pipeline import QRFConfig, QRFPseudoRTConfig, run_qrf_pseudort
+from rt_benchmarks.config_io import load_delay_map, select_predictors
 from rt_benchmarks.data_io import load_panel_csv, load_target_csv
 from rt_benchmarks.outputs import write_predictions, write_run_config, write_scores
 from rt_benchmarks.sample_builder import SampleBuilderConfig
@@ -36,65 +36,38 @@ def _parse_max_features(value: str) -> str | float:
         return value
 
 
-def _select_predictors(
-    X: pd.DataFrame,
-    predictors: list[str] | None,
-    n_predictors: int,
-) -> list[str]:
-    if predictors is not None:
-        missing = [c for c in predictors if c not in X.columns]
-        if missing:
-            raise ValueError(f"Requested predictors not found in X: {missing}")
-        return predictors
-
-    if n_predictors <= 0:
-        raise ValueError("--n-predictors must be >= 1 when --predictors is not provided")
-
-    return list(X.columns[:n_predictors])
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run initial point-forecast QRF pseudo-real-time nowcast benchmark."
     )
 
-    parser.add_argument(
-        "--x-path",
-        required=True,
-        help="Path to monthly predictor CSV",
-    )
-    parser.add_argument(
-        "--y-path",
-        required=True,
-        help="Path to target CSV on the model scale used for fitting",
-    )
-    parser.add_argument(
-        "--outdir",
-        default="outputs/qrf/basic_nowcast",
-        help="Output directory",
-    )
+    parser.add_argument("--x-path", required=True, help="Path to monthly predictor CSV")
+    parser.add_argument("--y-path", required=True, help="Path to target CSV on the model scale used for fitting")
+    parser.add_argument("--outdir", default="outputs/qrf/basic_nowcast", help="Output directory")
 
-    parser.add_argument(
-        "--eval-start",
-        required=True,
-        help="Evaluation start month, e.g. 2016-01-01",
-    )
-    parser.add_argument(
-        "--eval-end",
-        required=True,
-        help="Evaluation end month, e.g. 2017-12-01",
-    )
+    parser.add_argument("--eval-start", required=True, help="Evaluation start month, e.g. 2016-01-01")
+    parser.add_argument("--eval-end", required=True, help="Evaluation end month, e.g. 2017-12-01")
 
     parser.add_argument(
         "--predictors",
         default=None,
-        help="Comma-separated predictor list. If omitted, the first n predictors are used.",
+        help="Comma-separated predictor list. Overrides --predictors-path when provided.",
+    )
+    parser.add_argument(
+        "--predictors-path",
+        default=None,
+        help="Path to predictor list file (.json/.txt/.csv). Used if --predictors is omitted.",
+    )
+    parser.add_argument(
+        "--predictors-col",
+        default=None,
+        help="Column name to use when --predictors-path points to a CSV file.",
     )
     parser.add_argument(
         "--n-predictors",
         type=int,
         default=10,
-        help="Number of predictors to use if --predictors is omitted",
+        help="Number of predictors to keep. If a predictor file/list is provided, keeps the first n entries.",
     )
 
     parser.add_argument("--n-lags", type=int, default=3)
@@ -107,6 +80,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--random-state", type=int, default=0)
 
     parser.add_argument("--delay-style", default="none")
+    parser.add_argument("--delay-map-path", default=None, help="Optional JSON delay-map path")
     parser.add_argument("--gdp-rel", type=int, default=0)
     parser.add_argument(
         "--no-qe-leak",
@@ -125,16 +99,19 @@ def main() -> None:
     X = load_panel_csv(args.x_path)
     y = load_target_csv(args.y_path)
 
-    predictors_arg = _parse_predictors_arg(args.predictors)
-    predictors = _select_predictors(
-        X=X,
-        predictors=predictors_arg,
+    predictors = select_predictors(
+        X_columns=list(X.columns),
+        predictors=_parse_predictors_arg(args.predictors),
+        predictors_path=args.predictors_path,
+        predictors_col=args.predictors_col,
         n_predictors=args.n_predictors,
     )
 
+    delay_map = load_delay_map(args.delay_map_path)
+
     vintage_cfg = VintageConfig(
         delay_style=args.delay_style,
-        delay_map=None,
+        delay_map=delay_map,
         gdp_rel=args.gdp_rel,
         no_qe_leak=bool(args.no_qe_leak),
     )
@@ -184,6 +161,9 @@ def main() -> None:
             "eval_end": args.eval_end,
             "horizons": ["now"],
             "predictors": predictors,
+            "predictors_path": args.predictors_path,
+            "predictors_col": args.predictors_col,
+            "n_predictors": args.n_predictors,
             "n_lags": args.n_lags,
             "n_y_lags": args.n_y_lags,
             "min_train_rows": args.min_train_rows,
@@ -192,6 +172,7 @@ def main() -> None:
             "max_features": _parse_max_features(args.max_features),
             "random_state": args.random_state,
             "delay_style": args.delay_style,
+            "delay_map_path": args.delay_map_path,
             "gdp_rel": args.gdp_rel,
             "no_qe_leak": bool(args.no_qe_leak),
         },
