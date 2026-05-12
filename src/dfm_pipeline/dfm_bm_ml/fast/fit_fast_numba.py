@@ -164,7 +164,8 @@ def fit_bm_dfm_fast_numba(
             converged = True
             break
 
-    C, R, A, Q, a0, P0, state_index = build_state_space(
+    # Canonical matrix API: A is the transition matrix and C is the measurement matrix.
+    A, Q, C, R, a0, P0, state_index = build_state_space(
         params=params,
         nM=nM,
         nQ=nQ,

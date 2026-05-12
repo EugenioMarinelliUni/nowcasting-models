@@ -28,11 +28,15 @@ class BMDfmResult:
     P_smooth: Any
     P_lag_smooth: Any
 
-    # Measurement / transition matrices
-    C: Any
-    R: Any
+    # State-space matrices. Canonical API:
+    #   A: transition matrix, shape (n_state, n_state)
+    #   Q: transition-innovation covariance, shape (n_state, n_state)
+    #   C: measurement matrix, shape (n_observed, n_state)
+    #   R: measurement-error covariance, shape (n_observed, n_observed)
     A: Any
     Q: Any
+    C: Any
+    R: Any
     a0: Any = None
     P0: Any = None
 
@@ -42,6 +46,26 @@ class BMDfmResult:
     config: Optional[BMDfmConfig] = None
     converged: bool = False
     em_cache: Optional[EMStepCache] = None
+
+    @property
+    def T(self) -> Any:
+        """Alias for the transition matrix A."""
+        return self.A
+
+    @property
+    def transition(self) -> Any:
+        """Alias for the transition matrix A."""
+        return self.A
+
+    @property
+    def Z(self) -> Any:
+        """Alias for the measurement matrix C."""
+        return self.C
+
+    @property
+    def measurement(self) -> Any:
+        """Alias for the measurement matrix C."""
+        return self.C
 
 
 __all__ = [

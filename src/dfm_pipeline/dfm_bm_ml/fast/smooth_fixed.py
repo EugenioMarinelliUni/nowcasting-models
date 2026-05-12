@@ -17,8 +17,8 @@ class FixedSmoothResult:
     a_smooth: np.ndarray
     P_smooth: np.ndarray
     P_lag_smooth: np.ndarray
-    A: np.ndarray  # measurement (named A in your BM result objects)
-    C: np.ndarray  # transition (named C in your BM result objects)
+    A: np.ndarray  # transition matrix, shape (n_state, n_state)
+    C: np.ndarray  # measurement matrix, shape (n_obs, n_state)
 
 
 def smooth_bm_dfm_fixed_params(
@@ -31,8 +31,8 @@ def smooth_bm_dfm_fixed_params(
 ) -> Tuple[FixedSmoothResult, PanelScaler]:
     """
     Run Kalman filter/smoother with fixed BMParams (no EM / no parameter updates).
-    Returns smoothed states + (transition, measurement) matrices in the same naming
-    convention used by your BM fit results.
+    Returns smoothed states and matrices using the canonical BM result API:
+    A is the transition matrix and C is the measurement matrix.
     """
     config.validate()
 
@@ -80,14 +80,12 @@ def smooth_bm_dfm_fixed_params(
     ss = StateSpaceParams(T=Tm, Q=Qm, C=C_meas, R=R_used, a0=a0, P0=P0)
     kres = kalman_filter_smoother(Y, ss)
 
-    # Match your BM “result naming” convention:
-    # res.C is transition, res.A is measurement (this is how your pipeline behaves today)
     out = FixedSmoothResult(
         loglik=float(kres.loglik),
         a_smooth=kres.a_smooth,
         P_smooth=kres.P_smooth,
         P_lag_smooth=kres.P_lag_smooth,
-        A=C_meas,   # measurement
-        C=Tm,       # transition
+        A=Tm,       # transition
+        C=C_meas,   # measurement
     )
     return out, scaler

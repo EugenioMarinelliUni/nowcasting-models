@@ -149,14 +149,24 @@ def _apply_quarter_end_leakage_guard(
 # -----------------------------------------------------------------------------
 
 def _extract_transition_and_measurement(res: Any, *, n_obs_expected: int) -> tuple[np.ndarray, np.ndarray]:
+    """Return (transition, measurement) from a BM result.
+
+    Canonical BM API after the matrix fix:
+      - res.A is the transition matrix, shape (n_state, n_state)
+      - res.C is the measurement matrix, shape (n_obs, n_state)
+
+    The shape fallback keeps older saved/intermediate objects readable.
+    """
     A = _squeeze_last(np.asarray(_to_attr(res, "A"), dtype=float))
     C = _squeeze_last(np.asarray(_to_attr(res, "C"), dtype=float))
 
-    if _is_square(C) and A.ndim == 2 and A.shape[0] == n_obs_expected and A.shape[1] == C.shape[0]:
-        return C, A
-
+    # Preferred canonical path.
     if _is_square(A) and C.ndim == 2 and C.shape[0] == n_obs_expected and C.shape[1] == A.shape[0]:
         return A, C
+
+    # Backward-compatible path for old objects that accidentally stored C=transition, A=measurement.
+    if _is_square(C) and A.ndim == 2 and A.shape[0] == n_obs_expected and A.shape[1] == C.shape[0]:
+        return C, A
 
     raise ValueError(
         "Cannot identify transition/measurement matrices from result.\n"
@@ -251,7 +261,7 @@ def _smooth_fixed_params(
             )
 
     a_smooth = np.asarray(_to_attr(ks, "a_smooth"), dtype=float)
-    return SimpleNamespace(A=C_meas, C=Tm, a_smooth=a_smooth)
+    return SimpleNamespace(A=Tm, C=C_meas, a_smooth=a_smooth)
 
 
 # -----------------------------------------------------------------------------
