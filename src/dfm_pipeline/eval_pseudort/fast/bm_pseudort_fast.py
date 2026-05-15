@@ -9,6 +9,7 @@ from typing import Any, Callable, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from dfm_pipeline.preprocessing.bm_inputs import validate_quarter_end_target_alignment
 from dfm_pipeline.utils.threadpool import limit_blas_threads
 
 
@@ -341,6 +342,7 @@ def run_pseudo_rt_eval_fast(
 
     y_full = y_full.copy()
     y_full.index = _normalize_month_start(y_full.index)
+    validate_quarter_end_target_alignment(y_full, name="y_full")
 
     idx = X_full.index.intersection(y_full.index).sort_values()
     X_full = X_full.loc[idx]
@@ -610,6 +612,7 @@ def _read_panel_target(panel_csv: str, target_csv: str) -> tuple[pd.DataFrame, p
 
     X.index = _normalize_month_start(X.index)
     ydf.index = _normalize_month_start(ydf.index)
+    validate_quarter_end_target_alignment(ydf, name=str(target_csv))
 
     ynum = ydf.select_dtypes(include=[np.number])
     if ynum.shape[1] == 0:

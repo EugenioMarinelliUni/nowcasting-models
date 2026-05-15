@@ -1,7 +1,70 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import numpy as np
 import pandas as pd
+
+
+def _normalize_month_start(idx: pd.Index | Sequence[object]) -> pd.DatetimeIndex:
+    return pd.DatetimeIndex(pd.to_datetime(idx)).to_period("M").to_timestamp(how="start")
+
+
+def validate_quarter_end_target_alignment(
+    y: pd.Series | pd.DataFrame,
+    *,
+    quarter_end_months: Sequence[int] = (3, 6, 9, 12),
+    name: str = "quarterly target",
+) -> None:
+    """Validate that observed quarterly target values sit on quarter-end months.
+
+    The BM mixed-frequency DFM expects quarterly observations to be placed on
+    the month-start timestamp of quarter-end months: March, June, September,
+    and December. A target stored instead on Jan/Apr/Jul/Oct silently changes
+    the pseudo-real-time target date mapping and can make actuals appear as
+    NaN at quarter ends.
+
+    Parameters
+    ----------
+    y:
+        Series or one/multi-column DataFrame indexed by dates. DataFrame rows
+        are considered observed when at least one column is non-NaN.
+    quarter_end_months:
+        Allowed month numbers for non-NaN target observations.
+    name:
+        Label used in error messages.
+    """
+    if isinstance(y, pd.DataFrame):
+        observed = y.notna().any(axis=1).to_numpy(dtype=bool)
+        raw_index = y.index
+    else:
+        s = pd.Series(y)
+        observed = s.notna().to_numpy(dtype=bool)
+        raw_index = s.index
+
+    if len(raw_index) == 0 or not bool(np.any(observed)):
+        return
+
+    idx = _normalize_month_start(raw_index)
+    allowed = {int(m) for m in quarter_end_months}
+    bad_mask = observed & np.array([int(ts.month) not in allowed for ts in idx], dtype=bool)
+
+    if not bool(np.any(bad_mask)):
+        return
+
+    bad_dates = idx[bad_mask]
+    preview = ", ".join(ts.strftime("%Y-%m-%d") for ts in bad_dates[:8])
+    if len(bad_dates) > 8:
+        preview += ", ..."
+
+    allowed_label = "/".join(str(m).zfill(2) for m in sorted(allowed))
+    raise ValueError(
+        f"{name} has non-NaN observations outside quarter-end months. "
+        f"Expected observed quarterly targets only in months {allowed_label}; "
+        f"found invalid date(s): {preview}. "
+        "Use a BM monthly target aligned to Mar/Jun/Sep/Dec, such as "
+        "y_target_z__bm_monthly.csv, or remap the quarterly target to quarter_end."
+    )
 
 
 def load_bm_inputs_from_csv(
@@ -14,6 +77,7 @@ def load_bm_inputs_from_csv(
     date_format: str | None = None,
     quarterly_period: str = "Q-DEC",
     place_quarterly_on: str = "quarter_end",  # "quarter_end" or "quarter_start"
+    require_quarter_end_target: bool = False,
     join: str = "inner",  # "inner" or "outer"
     sort_index: bool = True,
 ) -> tuple[np.ndarray, np.ndarray, pd.DatetimeIndex]:
@@ -22,9 +86,14 @@ def load_bm_inputs_from_csv(
     on a common monthly DatetimeIndex (month-start).
 
     Supports two target formats:
-      (a) Quarterly-dated target (one obs per quarter): mapped to a month (quarter_end/quarter_start).
-      (b) Monthly-dated target already on the monthly index (with NaNs in non-quarterly months):
-          used as-is (no quarter remapping).
+      (a) Quarterly-dated target (one obs per quarter): mapped to a month
+          (quarter_end/quarter_start).
+      (b) Monthly-dated target already on the monthly index (with NaNs in
+          non-quarterly months): used as-is (no quarter remapping).
+
+    Set require_quarter_end_target=True for the BM mixed-frequency DFM. This
+    rejects monthly target files whose non-NaN quarterly values are stored at
+    Jan/Apr/Jul/Oct instead of Mar/Jun/Sep/Dec.
     """
 
     def _read_with_date_index(path: str, date_col: str) -> pd.DataFrame:
@@ -58,7 +127,7 @@ def load_bm_inputs_from_csv(
 
     yq = yq[[quarterly_value_col]].apply(pd.to_numeric, errors="coerce")
 
-    # Decide whether target is already monthly-indexed (case b) or truly quarterly-dated (case a)
+    # Decide whether target is already monthly-indexed (case b) or truly quarterly-dated (case a).
     # If there are far more unique months than unique quarters, treat as monthly.
     n_unique_months = yq.index.to_period("M").nunique()
     n_unique_quarters = yq.index.to_period(quarterly_period).nunique()
@@ -93,6 +162,9 @@ def load_bm_inputs_from_csv(
     if sort_index:
         yq_m = yq_m.sort_index()
 
+    if require_quarter_end_target:
+        validate_quarter_end_target_alignment(yq_m, name=str(path_quarterly_csv))
+
     # --- align on a common monthly index ---
     if join == "inner":
         idx = Xm.index
@@ -111,3 +183,6 @@ def load_bm_inputs_from_csv(
     y_target = y_aligned.to_numpy(dtype=float)
 
     return Y_monthly, y_target, idx
+
+
+__all__ = ["load_bm_inputs_from_csv", "validate_quarter_end_target_alignment"]

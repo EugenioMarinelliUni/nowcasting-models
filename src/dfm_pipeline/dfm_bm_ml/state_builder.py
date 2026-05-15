@@ -9,8 +9,10 @@ Implements:
     * True  -> monthly idios are AR(1) states in the state vector.
     * False -> no monthly idio states; monthly noise is only in measurement R.
 - Initial state covariance mode (P0_mode):
-    * diffuse      -> P0 = 1e4 * I
-    * steady_state -> blockwise unconditional covariance via discrete Lyapunov.
+    * diffuse                         -> P0 = 1e4 * I
+    * steady_state                    -> blockwise unconditional covariance via discrete Lyapunov.
+    * steady_state_factor_diffuse_idio -> steady-state factor block covariance,
+                                          diffuse idiosyncratic blocks.
 - Optional overrides for a0/P0 (for toolbox-style per-EM-iteration initial moment updates).
 """
 
@@ -263,10 +265,11 @@ def build_state_space(
     else:
         if P0_mode == "diffuse":
             P0 = np.eye(m, dtype=float) * 1e4
-        elif P0_mode == "steady_state":
+        elif P0_mode in {"steady_state", "steady_state_factor_diffuse_idio"}:
             P0 = np.zeros((m, m), dtype=float)
 
-            # Factor blocks
+            # Factor blocks: toolbox-style steady-state initialization for the
+            # stationary factor companion block.
             for sl in factor_slices:
                 A = Tm[sl, sl]
                 Q = Qm[sl, sl]
@@ -275,20 +278,31 @@ def build_state_space(
                 except Exception:
                     P0[sl, sl] = np.eye(A.shape[0], dtype=float) * 1e4
 
-            # Monthly idios: stationary variances on diagonal
-            if bool(idio_ar1):
-                for i in range(int(nM)):
-                    s = idx_idio_monthly.start + i
-                    P0[s, s] = float(max(params.sig2_m[i], 0.0))
+            if P0_mode == "steady_state":
+                # Monthly idios: stationary variances on diagonal.
+                if bool(idio_ar1):
+                    for i in range(int(nM)):
+                        s = idx_idio_monthly.start + i
+                        P0[s, s] = float(max(params.sig2_m[i], 0.0))
 
-            # Quarterly idios: 5x5 Lyapunov per series
-            for j in range(int(nQ)):
-                s0 = idx_idio_quarterly.start + 5 * j
-                A = Tm[s0:s0 + 5, s0:s0 + 5]
-                Q = Qm[s0:s0 + 5, s0:s0 + 5]
-                try:
-                    P0[s0:s0 + 5, s0:s0 + 5] = _steady_state_block(A, Q, jitter=float(jitter))
-                except Exception:
+                # Quarterly idios: 5x5 Lyapunov per series.
+                for j in range(int(nQ)):
+                    s0 = idx_idio_quarterly.start + 5 * j
+                    A = Tm[s0:s0 + 5, s0:s0 + 5]
+                    Q = Qm[s0:s0 + 5, s0:s0 + 5]
+                    try:
+                        P0[s0:s0 + 5, s0:s0 + 5] = _steady_state_block(A, Q, jitter=float(jitter))
+                    except Exception:
+                        P0[s0:s0 + 5, s0:s0 + 5] = np.eye(5, dtype=float) * 1e4
+            else:
+                # Hybrid mode: keep only the factor block at steady state and
+                # initialize monthly/quarterly idiosyncratic states diffusely.
+                # This resolves the previously accepted-but-unimplemented config
+                # value while preserving a clear interpretation of the mode name.
+                if bool(idio_ar1):
+                    P0[idx_idio_monthly, idx_idio_monthly] = np.eye(int(nM), dtype=float) * 1e4
+                for j in range(int(nQ)):
+                    s0 = idx_idio_quarterly.start + 5 * j
                     P0[s0:s0 + 5, s0:s0 + 5] = np.eye(5, dtype=float) * 1e4
 
             P0 = safe_sym(P0)
