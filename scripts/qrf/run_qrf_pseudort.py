@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import sys
 from pathlib import Path
 from typing import Any
@@ -11,9 +12,8 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-import pandas as pd
-
-from qrf_pipeline import QRFConfig, QRFPseudoRTConfig, run_qrf_pseudort
+from qrf_pipeline.config import QRFConfig
+from qrf_pipeline.pseudort import QRFPseudoRTConfig, run_qrf_pseudort
 from rt_benchmarks.config_io import load_delay_map, select_predictors
 from rt_benchmarks.data_io import load_panel_csv, load_target_csv
 from rt_benchmarks.outputs import write_predictions, write_run_config, write_scores
@@ -24,69 +24,151 @@ from rt_benchmarks.vintage import VintageConfig
 def _parse_predictors_arg(value: str | None) -> list[str] | None:
     if value is None:
         return None
+
     items = [x.strip() for x in value.split(",")]
     items = [x for x in items if x]
+
     return items or None
 
 
-def _parse_max_features(value: str) -> str | float:
-    try:
-        return float(value)
-    except ValueError:
+def _parse_quantiles(value: str) -> tuple[float, ...]:
+    items = [x.strip() for x in value.split(",") if x.strip()]
+    quantiles = tuple(float(x) for x in items)
+
+    if not quantiles:
+        raise ValueError("--quantiles cannot be empty")
+
+    for q in quantiles:
+        if q <= 0.0 or q >= 1.0:
+            raise ValueError(f"Invalid quantile {q}. Quantiles must be inside (0, 1).")
+
+    if tuple(sorted(quantiles)) != quantiles:
+        raise ValueError("--quantiles must be sorted increasingly")
+
+    return quantiles
+
+
+def _parse_max_features(value: str) -> int | float | str | None:
+    value = str(value).strip()
+
+    if value.lower() in {"none", "null"}:
+        return None
+
+    if value in {"sqrt", "log2"}:
         return value
+
+    try:
+        if "." in value:
+            out = float(value)
+            if out <= 0.0:
+                raise ValueError
+            return out
+
+        out_int = int(value)
+        if out_int <= 0:
+            raise ValueError
+        return out_int
+
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "--max-features must be one of: sqrt, log2, None, positive int, or positive float."
+        ) from exc
+
+
+def _build_qrf_config(
+    args: argparse.Namespace,
+    predictors: list[str],
+    quantiles: tuple[float, ...],
+) -> QRFConfig:
+    """
+    Build QRFConfig while staying compatible with versions where QRFConfig
+    may not yet expose backend/quantiles.
+    """
+    kwargs: dict[str, Any] = {
+        "predictors": predictors,
+        "n_lags": args.n_lags,
+        "n_y_lags": args.n_y_lags,
+        "min_train_rows": args.min_train_rows,
+        "n_estimators": args.n_estimators,
+        "min_samples_leaf": args.min_samples_leaf,
+        "max_features": args.max_features,
+        "random_state": args.random_state,
+    }
+
+    sig = inspect.signature(QRFConfig)
+
+    if "backend" in sig.parameters:
+        kwargs["backend"] = args.backend
+
+    if "quantiles" in sig.parameters:
+        kwargs["quantiles"] = quantiles
+
+    cfg = QRFConfig(**kwargs)
+
+    if "backend" not in sig.parameters:
+        setattr(cfg, "backend", args.backend)
+
+    if "quantiles" not in sig.parameters:
+        setattr(cfg, "quantiles", quantiles)
+
+    return cfg
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run initial point-forecast QRF pseudo-real-time nowcast benchmark."
+        description="Run QRF / RF pseudo-real-time nowcast benchmark."
     )
 
-    parser.add_argument("--x-path", required=True, help="Path to monthly predictor CSV")
-    parser.add_argument("--y-path", required=True, help="Path to target CSV on the model scale used for fitting")
-    parser.add_argument("--outdir", default="outputs/qrf/basic_nowcast", help="Output directory")
+    parser.add_argument("--x-path", required=True)
+    parser.add_argument("--y-path", required=True)
+    parser.add_argument("--outdir", default="outputs/qrf/basic_nowcast")
 
-    parser.add_argument("--eval-start", required=True, help="Evaluation start month, e.g. 2016-01-01")
-    parser.add_argument("--eval-end", required=True, help="Evaluation end month, e.g. 2017-12-01")
+    parser.add_argument("--eval-start", required=True)
+    parser.add_argument("--eval-end", required=True)
 
     parser.add_argument(
-        "--predictors",
-        default=None,
-        help="Comma-separated predictor list. Overrides --predictors-path when provided.",
+        "--backend",
+        choices=["rf_point", "qrf"],
+        default="rf_point",
+        help="rf_point uses point Random Forest; qrf uses quantile forest.",
     )
+
     parser.add_argument(
-        "--predictors-path",
-        default=None,
-        help="Path to predictor list file (.json/.txt/.csv). Used if --predictors is omitted.",
+        "--quantiles",
+        default="0.10,0.25,0.50,0.75,0.90",
+        help="Comma-separated quantiles used when backend='qrf'.",
     )
-    parser.add_argument(
-        "--predictors-col",
-        default=None,
-        help="Column name to use when --predictors-path points to a CSV file.",
-    )
-    parser.add_argument(
-        "--n-predictors",
-        type=int,
-        default=10,
-        help="Number of predictors to keep. If a predictor file/list is provided, keeps the first n entries.",
-    )
+
+    parser.add_argument("--predictors", default=None)
+    parser.add_argument("--predictors-path", default=None)
+    parser.add_argument("--predictors-col", default=None)
+    parser.add_argument("--n-predictors", type=int, default=20)
 
     parser.add_argument("--n-lags", type=int, default=3)
     parser.add_argument("--n-y-lags", type=int, default=2)
     parser.add_argument("--min-train-rows", type=int, default=36)
 
     parser.add_argument("--n-estimators", type=int, default=500)
-    parser.add_argument("--min-samples-leaf", type=int, default=10)
-    parser.add_argument("--max-features", default="sqrt")
-    parser.add_argument("--random-state", type=int, default=0)
+    parser.add_argument("--min-samples-leaf", type=int, default=5)
+    parser.add_argument("--max-features", type=_parse_max_features, default="sqrt")
+    parser.add_argument("--random-state", type=int, default=123)
 
     parser.add_argument("--delay-style", default="none")
-    parser.add_argument("--delay-map-path", default=None, help="Optional JSON delay-map path")
+    parser.add_argument("--delay-map-path", default=None)
     parser.add_argument("--gdp-rel", type=int, default=0)
+
     parser.add_argument(
         "--no-qe-leak",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Apply quarter-end leakage guard (default: enabled)",
+        help="Prevent quarter-end nowcast from using the just-released quarterly target.",
+    )
+
+    parser.add_argument(
+        "--progress",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Show a tqdm progress bar over pseudo-real-time vintages.",
     )
 
     return parser
@@ -122,15 +204,12 @@ def main() -> None:
         include_row_metadata=True,
     )
 
-    model_cfg = QRFConfig(
+    quantiles = _parse_quantiles(args.quantiles)
+
+    model_cfg = _build_qrf_config(
+        args=args,
         predictors=predictors,
-        n_lags=args.n_lags,
-        n_y_lags=args.n_y_lags,
-        min_train_rows=args.min_train_rows,
-        n_estimators=args.n_estimators,
-        min_samples_leaf=args.min_samples_leaf,
-        max_features=_parse_max_features(args.max_features),
-        random_state=args.random_state,
+        quantiles=quantiles,
     )
 
     eval_cfg = QRFPseudoRTConfig(
@@ -138,6 +217,7 @@ def main() -> None:
         eval_end=args.eval_end,
         horizons=("now",),
         drop_invalid_rows=True,
+        show_progress=bool(args.progress),
     )
 
     pred_df, scores = run_qrf_pseudort(
@@ -149,9 +229,11 @@ def main() -> None:
     )
 
     outdir = Path(args.outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
 
     pred_path = write_predictions(pred_df, outdir)
     scores_path = write_scores(scores, outdir)
+
     run_cfg_path = write_run_config(
         {
             "x_path": args.x_path,
@@ -160,6 +242,8 @@ def main() -> None:
             "eval_start": args.eval_start,
             "eval_end": args.eval_end,
             "horizons": ["now"],
+            "backend": args.backend,
+            "quantiles": list(quantiles),
             "predictors": predictors,
             "predictors_path": args.predictors_path,
             "predictors_col": args.predictors_col,
@@ -169,20 +253,23 @@ def main() -> None:
             "min_train_rows": args.min_train_rows,
             "n_estimators": args.n_estimators,
             "min_samples_leaf": args.min_samples_leaf,
-            "max_features": _parse_max_features(args.max_features),
+            "max_features": args.max_features,
             "random_state": args.random_state,
             "delay_style": args.delay_style,
             "delay_map_path": args.delay_map_path,
             "gdp_rel": args.gdp_rel,
             "no_qe_leak": bool(args.no_qe_leak),
+            "progress": bool(args.progress),
         },
         outdir,
     )
 
     print("QRF pseudo-RT run completed")
+    print("Backend:", args.backend)
     print("X shape:", X.shape)
     print("y length:", len(y))
     print("Predictors used:", predictors)
+    print("Max features:", args.max_features, type(args.max_features).__name__)
     print("Prediction rows:", len(pred_df))
     print("Scores:", scores)
     print("Saved predictions to:", pred_path)
