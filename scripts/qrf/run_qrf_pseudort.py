@@ -13,7 +13,10 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from qrf_pipeline.config import QRFConfig
+from qrf_pipeline.diagnostics import summarize_by_month_of_quarter, summarize_by_target_quarter
+from qrf_pipeline.importance import write_importance_outputs
 from qrf_pipeline.pseudort import QRFPseudoRTConfig, run_qrf_pseudort
+from qrf_pipeline.raw_scale import load_target_scaler
 from rt_benchmarks.config_io import load_delay_map, select_predictors
 from rt_benchmarks.data_io import load_panel_csv, load_target_csv
 from rt_benchmarks.outputs import write_predictions, write_run_config, write_scores
@@ -80,10 +83,6 @@ def _build_qrf_config(
     predictors: list[str],
     quantiles: tuple[float, ...],
 ) -> QRFConfig:
-    """
-    Build QRFConfig while staying compatible with versions where QRFConfig
-    may not yet expose backend/quantiles.
-    """
     kwargs: dict[str, Any] = {
         "predictors": predictors,
         "n_lags": args.n_lags,
@@ -93,23 +92,20 @@ def _build_qrf_config(
         "min_samples_leaf": args.min_samples_leaf,
         "max_features": args.max_features,
         "random_state": args.random_state,
+        "backend": args.backend,
+        "quantiles": quantiles,
+        "n_jobs": args.n_jobs,
+        "save_feature_importance": bool(args.save_feature_importance),
     }
 
     sig = inspect.signature(QRFConfig)
+    supported = {k: v for k, v in kwargs.items() if k in sig.parameters}
+    cfg = QRFConfig(**supported)
 
-    if "backend" in sig.parameters:
-        kwargs["backend"] = args.backend
-
-    if "quantiles" in sig.parameters:
-        kwargs["quantiles"] = quantiles
-
-    cfg = QRFConfig(**kwargs)
-
-    if "backend" not in sig.parameters:
-        setattr(cfg, "backend", args.backend)
-
-    if "quantiles" not in sig.parameters:
-        setattr(cfg, "quantiles", quantiles)
+    # Compatibility for older dataclass signatures.
+    for k, v in kwargs.items():
+        if not hasattr(cfg, k):
+            setattr(cfg, k, v)
 
     return cfg
 
@@ -152,6 +148,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-samples-leaf", type=int, default=5)
     parser.add_argument("--max-features", type=_parse_max_features, default="sqrt")
     parser.add_argument("--random-state", type=int, default=123)
+    parser.add_argument("--n-jobs", type=int, default=-1)
 
     parser.add_argument("--delay-style", default="none")
     parser.add_argument("--delay-map-path", default=None)
@@ -171,6 +168,32 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show a tqdm progress bar over pseudo-real-time vintages.",
     )
 
+    parser.add_argument(
+        "--save-feature-importance",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Save feature_importance.csv and feature_importance_by_predictor.csv when available.",
+    )
+
+    parser.add_argument(
+        "--write-diagnostics",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Save summary_by_moq.csv and summary_by_target_quarter.csv.",
+    )
+
+    parser.add_argument(
+        "--y-raw-path",
+        default=None,
+        help="Optional raw-scale target CSV. If supplied, raw-scale scores use this actual target.",
+    )
+
+    parser.add_argument(
+        "--target-scaler-path",
+        default=None,
+        help="Optional JSON scaler for inverse-transforming standardized predictions to raw scale.",
+    )
+
     return parser
 
 
@@ -180,6 +203,15 @@ def main() -> None:
 
     X = load_panel_csv(args.x_path)
     y = load_target_csv(args.y_path)
+
+    y_raw = load_target_csv(args.y_raw_path) if args.y_raw_path else None
+
+    pred_to_raw_fn = None
+    if args.target_scaler_path:
+        scaler = load_target_scaler(args.target_scaler_path)
+
+        def pred_to_raw_fn(value, target_date):
+            return scaler.inverse(value)
 
     predictors = select_predictors(
         X_columns=list(X.columns),
@@ -218,6 +250,7 @@ def main() -> None:
         horizons=("now",),
         drop_invalid_rows=True,
         show_progress=bool(args.progress),
+        collect_feature_importance=bool(args.save_feature_importance),
     )
 
     pred_df, scores = run_qrf_pseudort(
@@ -226,6 +259,8 @@ def main() -> None:
         eval_cfg=eval_cfg,
         sample_cfg=sample_cfg,
         model_cfg=model_cfg,
+        y_raw_full=y_raw,
+        pred_to_raw_fn=pred_to_raw_fn,
     )
 
     outdir = Path(args.outdir)
@@ -234,10 +269,34 @@ def main() -> None:
     pred_path = write_predictions(pred_df, outdir)
     scores_path = write_scores(scores, outdir)
 
+    feature_importance_paths = None
+    if args.save_feature_importance:
+        imp = pred_df.attrs.get("feature_importance")
+        if imp is not None and not imp.empty:
+            feature_importance_paths = write_importance_outputs(imp, outdir)
+
+    diagnostics_paths = {}
+    if args.write_diagnostics:
+        moq = summarize_by_month_of_quarter(pred_df, quantiles=quantiles)
+        tq = summarize_by_target_quarter(pred_df)
+
+        moq_path = outdir / "summary_by_moq.csv"
+        tq_path = outdir / "summary_by_target_quarter.csv"
+
+        moq.to_csv(moq_path, index=False)
+        tq.to_csv(tq_path, index=False)
+
+        diagnostics_paths = {
+            "summary_by_moq": str(moq_path),
+            "summary_by_target_quarter": str(tq_path),
+        }
+
     run_cfg_path = write_run_config(
         {
             "x_path": args.x_path,
             "y_path": args.y_path,
+            "y_raw_path": args.y_raw_path,
+            "target_scaler_path": args.target_scaler_path,
             "outdir": str(outdir),
             "eval_start": args.eval_start,
             "eval_end": args.eval_end,
@@ -255,11 +314,14 @@ def main() -> None:
             "min_samples_leaf": args.min_samples_leaf,
             "max_features": args.max_features,
             "random_state": args.random_state,
+            "n_jobs": args.n_jobs,
             "delay_style": args.delay_style,
             "delay_map_path": args.delay_map_path,
             "gdp_rel": args.gdp_rel,
             "no_qe_leak": bool(args.no_qe_leak),
             "progress": bool(args.progress),
+            "save_feature_importance": bool(args.save_feature_importance),
+            "write_diagnostics": bool(args.write_diagnostics),
         },
         outdir,
     )
@@ -270,11 +332,19 @@ def main() -> None:
     print("y length:", len(y))
     print("Predictors used:", predictors)
     print("Max features:", args.max_features, type(args.max_features).__name__)
+    print("n_jobs:", args.n_jobs)
     print("Prediction rows:", len(pred_df))
     print("Scores:", scores)
     print("Saved predictions to:", pred_path)
     print("Saved scores to:", scores_path)
     print("Saved run config to:", run_cfg_path)
+
+    if feature_importance_paths:
+        print("Saved feature importance to:", feature_importance_paths[0])
+        print("Saved predictor importance to:", feature_importance_paths[1])
+
+    for name, path in diagnostics_paths.items():
+        print(f"Saved {name} to:", path)
 
 
 if __name__ == "__main__":

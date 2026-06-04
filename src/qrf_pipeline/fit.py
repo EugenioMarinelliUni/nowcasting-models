@@ -17,7 +17,7 @@ def fit_qrf_point(
         min_samples_leaf=cfg.min_samples_leaf,
         max_features=cfg.max_features,
         random_state=cfg.random_state,
-        n_jobs=-1,
+        n_jobs=cfg.n_jobs,
     )
     model.fit(X_train, y_train)
 
@@ -43,14 +43,18 @@ def fit_qrf_quantile(
     if any(q <= 0.0 or q >= 1.0 for q in cfg.quantiles):
         raise ValueError("All quantiles must be strictly between 0 and 1")
 
-    model = RandomForestQuantileRegressor(
-        n_estimators=cfg.n_estimators,
-        min_samples_leaf=cfg.min_samples_leaf,
-        max_features=cfg.max_features,
-        random_state=cfg.random_state,
-        n_jobs=-1,
-        default_quantiles=list(cfg.quantiles),
-    )
+    kwargs = {
+        "n_estimators": cfg.n_estimators,
+        "min_samples_leaf": cfg.min_samples_leaf,
+        "max_features": cfg.max_features,
+        "random_state": cfg.random_state,
+        "default_quantiles": list(cfg.quantiles),
+    }
+
+    if cfg.n_jobs is not None:
+        kwargs["n_jobs"] = cfg.n_jobs
+
+    model = RandomForestQuantileRegressor(**kwargs)
     model.fit(X_train, y_train)
 
     return QRFQuantileModel(

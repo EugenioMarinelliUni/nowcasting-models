@@ -12,8 +12,10 @@ except ImportError:
     tqdm = None
 
 from qrf_pipeline.config import QRFConfig
+from qrf_pipeline.diagnostics import compute_qrf_density_diagnostics
 from qrf_pipeline.feature_builder import extract_qrf_features
 from qrf_pipeline.fit import fit_qrf_point
+from qrf_pipeline.importance import extract_feature_importance
 from qrf_pipeline.predict import predict_qrf_point
 from rt_benchmarks.metrics import compute_basic_metrics
 from rt_benchmarks.sample_builder import (
@@ -36,6 +38,7 @@ class QRFPseudoRTConfig:
     horizons: tuple[str, ...] = ("now",)
     drop_invalid_rows: bool = True
     show_progress: bool = False
+    collect_feature_importance: bool = True
 
 
 def _to_month_start(ts: Any) -> pd.Timestamp:
@@ -203,84 +206,8 @@ def _median_from_quantiles(q_preds: dict[float, float]) -> float:
         if abs(q - 0.5) < 1e-12:
             return float(val)
 
-    qs = sorted(q_preds)
-    values = [q_preds[q] for q in qs]
+    values = [q_preds[q] for q in sorted(q_preds)]
     return float(np.median(values))
-
-
-def _pinball_loss(y_true: np.ndarray, y_pred: np.ndarray, q: float) -> float:
-    err = y_true - y_pred
-    loss = np.maximum(q * err, (q - 1.0) * err)
-    return float(np.nanmean(loss))
-
-
-def _compute_quantile_metrics(
-    pred_df: pd.DataFrame,
-    quantiles: tuple[float, ...],
-) -> dict[str, Any]:
-    if pred_df.empty:
-        return {
-            "n": 0,
-            "pinball": {},
-            "mean_pinball": float("nan"),
-            "coverage_50": float("nan"),
-            "avg_width_50": float("nan"),
-            "coverage_80": float("nan"),
-            "avg_width_80": float("nan"),
-        }
-
-    actual = pd.to_numeric(pred_df["actual"], errors="coerce").to_numpy(dtype=float)
-    base_mask = np.isfinite(actual)
-
-    pinball: dict[str, float] = {}
-
-    for q in quantiles:
-        col = _q_col_name(q)
-        if col not in pred_df.columns:
-            continue
-
-        q_pred = pd.to_numeric(pred_df[col], errors="coerce").to_numpy(dtype=float)
-        mask = base_mask & np.isfinite(q_pred)
-
-        if mask.sum() == 0:
-            pinball[str(q)] = float("nan")
-        else:
-            pinball[str(q)] = _pinball_loss(actual[mask], q_pred[mask], q)
-
-    finite_pinball = [v for v in pinball.values() if np.isfinite(v)]
-    mean_pinball = float(np.mean(finite_pinball)) if finite_pinball else float("nan")
-
-    def _coverage_and_width(q_low: float, q_high: float) -> tuple[float, float]:
-        low_col = _q_col_name(q_low)
-        high_col = _q_col_name(q_high)
-
-        if low_col not in pred_df.columns or high_col not in pred_df.columns:
-            return float("nan"), float("nan")
-
-        lo = pd.to_numeric(pred_df[low_col], errors="coerce").to_numpy(dtype=float)
-        hi = pd.to_numeric(pred_df[high_col], errors="coerce").to_numpy(dtype=float)
-
-        mask = base_mask & np.isfinite(lo) & np.isfinite(hi)
-        if mask.sum() == 0:
-            return float("nan"), float("nan")
-
-        inside = (actual[mask] >= lo[mask]) & (actual[mask] <= hi[mask])
-        width = hi[mask] - lo[mask]
-
-        return float(np.mean(inside)), float(np.mean(width))
-
-    coverage_50, avg_width_50 = _coverage_and_width(0.25, 0.75)
-    coverage_80, avg_width_80 = _coverage_and_width(0.10, 0.90)
-
-    return {
-        "n": int(base_mask.sum()),
-        "pinball": pinball,
-        "mean_pinball": mean_pinball,
-        "coverage_50": coverage_50,
-        "avg_width_50": avg_width_50,
-        "coverage_80": coverage_80,
-        "avg_width_80": avg_width_80,
-    }
 
 
 def _make_eval_iterator(eval_months: pd.DatetimeIndex, show_progress: bool):
@@ -297,6 +224,43 @@ def _make_eval_iterator(eval_months: pd.DatetimeIndex, show_progress: bool):
         unit="vintage",
         ascii=True,
     )
+
+
+def _apply_raw_transform(
+    value: float,
+    target_date: pd.Timestamp,
+    pred_to_raw_fn: Callable[[float, pd.Timestamp], float] | None,
+) -> float:
+    if pred_to_raw_fn is None or not np.isfinite(value):
+        return value
+    return float(pred_to_raw_fn(float(value), target_date))
+
+
+def _append_feature_importance(
+    rows: list[dict[str, Any]],
+    *,
+    model: Any,
+    eval_date: pd.Timestamp,
+    target_date: pd.Timestamp,
+    horizon: str,
+    backend: str,
+) -> None:
+    feature_columns = list(getattr(model, "feature_columns", []))
+    imp = extract_feature_importance(model, feature_columns)
+    if imp.empty:
+        return
+
+    for _, r in imp.iterrows():
+        rows.append(
+            {
+                "eval_date": eval_date,
+                "target_date": target_date,
+                "horizon": horizon,
+                "backend": backend,
+                "feature": str(r["feature"]),
+                "importance": float(r["importance"]),
+            }
+        )
 
 
 def run_qrf_pseudort(
@@ -316,7 +280,10 @@ def run_qrf_pseudort(
     - rf_point: point RandomForestRegressor
     - qrf: RandomForestQuantileRegressor / quantile forest backend
 
-    The progress bar is controlled by eval_cfg.show_progress.
+    Extra diagnostics:
+    - pred_df.attrs["feature_importance"] contains per-vintage feature importances when available.
+    - scores["quantile"] contains pinball, CRPS approximation, coverage, width, and Winkler scores.
+    - if y_raw_full or pred_to_raw_fn is supplied, raw-scale point scores are used.
     """
     X_full = _normalize_monthly_frame_index(X_full)
     y_full = _normalize_monthly_series_index(y_full)
@@ -338,6 +305,7 @@ def run_qrf_pseudort(
     quantiles = _get_quantiles(model_cfg)
 
     rows: list[dict[str, Any]] = []
+    importance_rows: list[dict[str, Any]] = []
     iterator = _make_eval_iterator(eval_months, eval_cfg.show_progress)
 
     for eval_date in iterator:
@@ -385,6 +353,8 @@ def run_qrf_pseudort(
                 X_now = _sanitize_current_row(X_now)
 
                 if X_now is not None:
+                    model = None
+
                     if backend == "rf_point":
                         model = fit_qrf_point(
                             X_train=X_train,
@@ -417,17 +387,27 @@ def run_qrf_pseudort(
                             "Expected 'rf_point' or 'qrf'."
                         )
 
+                    if (
+                        model is not None
+                        and getattr(model_cfg, "save_feature_importance", True)
+                        and eval_cfg.collect_feature_importance
+                    ):
+                        _append_feature_importance(
+                            importance_rows,
+                            model=model,
+                            eval_date=eval_ms,
+                            target_date=target_date,
+                            horizon=horizon,
+                            backend=backend,
+                        )
+
             actual = _get_actual_value(y_full, target_date)
 
-            if pred_to_raw_fn is not None and np.isfinite(pred):
-                pred_raw = float(pred_to_raw_fn(pred, target_date))
-            else:
-                pred_raw = pred
-
+            pred_raw = _apply_raw_transform(pred, target_date, pred_to_raw_fn)
             if y_raw_full is not None:
                 actual_raw = _get_actual_value(y_raw_full, target_date)
             else:
-                actual_raw = actual
+                actual_raw = _apply_raw_transform(actual, target_date, pred_to_raw_fn)
 
             row: dict[str, Any] = {
                 "eval_date": eval_ms,
@@ -444,7 +424,10 @@ def run_qrf_pseudort(
 
             if backend == "qrf":
                 for q in quantiles:
-                    row[_q_col_name(q)] = q_preds.get(q, float("nan"))
+                    col = _q_col_name(q)
+                    q_val = q_preds.get(q, float("nan"))
+                    row[col] = q_val
+                    row[f"{col}_raw"] = _apply_raw_transform(q_val, target_date, pred_to_raw_fn)
 
             rows.append(row)
 
@@ -453,6 +436,13 @@ def run_qrf_pseudort(
         .sort_values(["eval_date", "horizon"])
         .reset_index(drop=True)
     )
+
+    if importance_rows:
+        pred_df.attrs["feature_importance"] = pd.DataFrame(importance_rows)
+    else:
+        pred_df.attrs["feature_importance"] = pd.DataFrame(
+            columns=["eval_date", "target_date", "horizon", "backend", "feature", "importance"]
+        )
 
     score_df = pred_df.copy()
     use_raw = pred_to_raw_fn is not None or y_raw_full is not None
@@ -463,8 +453,17 @@ def run_qrf_pseudort(
 
     scores = compute_basic_metrics(score_df)
     scores["backend"] = backend
+    scores["score_scale"] = "raw" if use_raw else "standardized"
 
     if backend == "qrf":
-        scores["quantile"] = _compute_quantile_metrics(pred_df, quantiles)
+        scores["quantile"] = compute_qrf_density_diagnostics(pred_df, quantiles)
+        if use_raw and all(f"{_q_col_name(q)}_raw" in pred_df.columns for q in quantiles):
+            raw_for_q = pred_df.rename(
+                columns={
+                    "actual_raw": "actual",
+                    **{f"{_q_col_name(q)}_raw": _q_col_name(q) for q in quantiles},
+                }
+            )
+            scores["quantile_raw"] = compute_qrf_density_diagnostics(raw_for_q, quantiles)
 
     return pred_df, scores
