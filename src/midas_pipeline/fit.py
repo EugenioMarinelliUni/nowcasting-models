@@ -306,6 +306,7 @@ def _fit_nonlinear_weighted(
     ridge_alpha: float,
     fallback_weight_scheme: str,
     initial_params: dict[str, float] | None,
+    accept_nonconverged: bool = True,
 ) -> MIDASFitResult:
     y_arr = y.to_numpy(dtype=float)
     initial_theta = _theta_from_params(scheme, initial_params)
@@ -353,7 +354,7 @@ def _fit_nonlinear_weighted(
             best_res = res
             best_start_index = start_index
 
-    if best_res is not None and np.isfinite(best_val):
+    if best_res is not None and np.isfinite(best_val) and (bool(best_res.success) or accept_nonconverged):
         params, param_dict = _params_from_theta(scheme, best_res.x)
         weights = lag_weights(n_monthly_lags, scheme=scheme, params=params)
         Z = _weighted_design(X, weights=weights, x_cols=x_cols, y_cols=y_cols)
@@ -429,6 +430,7 @@ def fit_univariate_midas_with_diagnostics(
     fallback_weight_scheme: str = "equal",
     ridge_alpha: float = 0.0,
     initial_params: dict[str, float] | None = None,
+    accept_nonconverged: bool = True,
 ) -> MIDASFitResult:
     scheme = weight_scheme.lower()
 
@@ -486,6 +488,7 @@ def fit_univariate_midas_with_diagnostics(
             ridge_alpha=ridge_alpha,
             fallback_weight_scheme=fallback_weight_scheme,
             initial_params=initial_params,
+            accept_nonconverged=accept_nonconverged,
         )
 
     raise ValueError(f"Unknown MIDAS weight_scheme: {weight_scheme}")
@@ -506,6 +509,7 @@ def fit_univariate_midas(
     fallback_weight_scheme: str = "equal",
     ridge_alpha: float = 0.0,
     initial_params: dict[str, float] | None = None,
+    accept_nonconverged: bool = True,
 ) -> MIDASModel:
     result = fit_univariate_midas_with_diagnostics(
         X_train=X_train,
@@ -521,5 +525,6 @@ def fit_univariate_midas(
         fallback_weight_scheme=fallback_weight_scheme,
         ridge_alpha=ridge_alpha,
         initial_params=initial_params,
+        accept_nonconverged=accept_nonconverged,
     )
     return result.model

@@ -31,6 +31,8 @@ class MIDASConfig:
     validation_tail_rows: int = 0
     moq_specific: bool = False
     warm_start: bool = True
+    accept_nonconverged: bool = True
+    n_jobs: int = 1
 
     def validate(self) -> None:
         if not self.predictors:
@@ -87,3 +89,8 @@ class MIDASConfig:
 
         if self.validation_tail_rows < 0:
             raise ValueError("validation_tail_rows cannot be negative")
+        if not isinstance(self.accept_nonconverged, bool):
+            raise ValueError("accept_nonconverged must be a boolean")
+
+        if self.n_jobs == 0:
+            raise ValueError("n_jobs cannot be 0; use 1 for serial or -1 for all cores")
