@@ -12,7 +12,7 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from qrf_pipeline.config import QRFConfig
+from qrf_pipeline.config import QRFConfig, normalize_max_features
 from qrf_pipeline.diagnostics import summarize_by_month_of_quarter, summarize_by_target_quarter
 from qrf_pipeline.importance import write_importance_outputs
 from qrf_pipeline.pseudort import QRFPseudoRTConfig, run_qrf_pseudort
@@ -52,29 +52,12 @@ def _parse_quantiles(value: str) -> tuple[float, ...]:
 
 
 def _parse_max_features(value: str) -> int | float | str | None:
-    value = str(value).strip()
-
-    if value.lower() in {"none", "null"}:
-        return None
-
-    if value in {"sqrt", "log2"}:
-        return value
-
     try:
-        if "." in value:
-            out = float(value)
-            if out <= 0.0:
-                raise ValueError
-            return out
-
-        out_int = int(value)
-        if out_int <= 0:
-            raise ValueError
-        return out_int
-
-    except ValueError as exc:
+        return normalize_max_features(value)
+    except (TypeError, ValueError) as exc:
         raise argparse.ArgumentTypeError(
-            "--max-features must be one of: sqrt, log2, None, positive int, or positive float."
+            "--max-features must be one of: sqrt, log2, None, "
+            "a positive integer, or a float in (0, 1]."
         ) from exc
 
 

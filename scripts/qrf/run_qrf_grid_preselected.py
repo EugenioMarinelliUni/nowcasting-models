@@ -9,7 +9,15 @@ from itertools import product
 from pathlib import Path
 from typing import Any
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+SRC_DIR = PROJECT_ROOT / "src"
+
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
 import pandas as pd
+
+from qrf_pipeline.config import max_features_label, normalize_max_features
 from tqdm import tqdm
 
 
@@ -19,6 +27,13 @@ def _parse_csv(value: str) -> list[str]:
 
 def _parse_int_grid(value: str) -> list[int]:
     return [int(x) for x in _parse_csv(value)]
+
+
+def _parse_max_features_grid(value: str) -> list[str | float | int | None]:
+    out = []
+    for item in _parse_csv(value):
+        out.append(normalize_max_features(item))
+    return out
 
 
 def _method_map(pred_root: Path, methods: list[str], top_k: int) -> dict[str, Path]:
@@ -149,14 +164,11 @@ def main() -> None:
             _parse_int_grid(args.n_lags_grid),
             _parse_int_grid(args.n_y_lags_grid),
             _parse_int_grid(args.min_samples_leaf_grid),
-            _parse_csv(args.max_features_grid),
+            _parse_max_features_grid(args.max_features_grid),
             _parse_int_grid(args.n_estimators_grid),
         ):
-            mf_label = (
-                "sqrt" if max_features == "sqrt"
-                else "log2" if max_features == "log2"
-                else "mf" + max_features.replace(".", "")
-            )
+            max_features = normalize_max_features(max_features)
+            mf_label = max_features_label(max_features)
 
             run_name = (
                 f"qrf_{method}_top{n_predictors}"
@@ -280,7 +292,7 @@ def main() -> None:
             "n_lags": int(best["n_lags"]),
             "n_y_lags": int(best["n_y_lags"]),
             "min_samples_leaf": int(best["min_samples_leaf"]),
-            "max_features": str(best["max_features"]),
+            "max_features": normalize_max_features(best["max_features"]),
             "n_estimators": int(best["n_estimators"]),
             "run_name": str(best["run"]).replace("qrf_", "qrf_test_"),
             "outdir": out_root / "test" / str(best["method"]) / str(best["run"]).replace("qrf_", "qrf_test_"),

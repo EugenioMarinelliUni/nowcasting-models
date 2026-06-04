@@ -263,6 +263,38 @@ def _append_feature_importance(
         )
 
 
+def _point_scores_for_columns(
+    pred_df: pd.DataFrame,
+    *,
+    pred_col: str,
+    actual_col: str,
+) -> dict:
+    score_df = pred_df[[pred_col, actual_col]].copy()
+    score_df = score_df.rename(columns={pred_col: "pred", actual_col: "actual"})
+    return compute_basic_metrics(score_df)
+
+
+def _quantile_diag_for_columns(
+    pred_df: pd.DataFrame,
+    *,
+    quantiles: tuple[float, ...],
+    actual_col: str,
+    raw: bool = False,
+) -> dict:
+    cols = {"actual": pd.to_numeric(pred_df[actual_col], errors="coerce")}
+
+    for q in quantiles:
+        base = _q_col_name(q)
+        col = f"{base}_raw" if raw else base
+        if col in pred_df.columns:
+            cols[base] = pd.to_numeric(pred_df[col], errors="coerce")
+
+    qdf = pd.DataFrame(cols, index=pred_df.index)
+    out = compute_qrf_density_diagnostics(qdf, quantiles, actual_col="actual")
+    out["score_scale"] = "raw" if raw else "standardized"
+    return out
+
+
 def run_qrf_pseudort(
     X_full: pd.DataFrame,
     y_full: pd.Series,
@@ -280,10 +312,10 @@ def run_qrf_pseudort(
     - rf_point: point RandomForestRegressor
     - qrf: RandomForestQuantileRegressor / quantile forest backend
 
-    Extra diagnostics:
-    - pred_df.attrs["feature_importance"] contains per-vintage feature importances when available.
-    - scores["quantile"] contains pinball, CRPS approximation, coverage, width, and Winkler scores.
-    - if y_raw_full or pred_to_raw_fn is supplied, raw-scale point scores are used.
+    Scores are always reported on the standardized scale at the top level.
+    If a raw target or inverse-transform function is supplied, raw-scale point
+    and density metrics are added under scores["raw"] and scores["quantile_raw"],
+    with convenience flat keys such as rmse_raw and mae_raw.
     """
     X_full = _normalize_monthly_frame_index(X_full)
     y_full = _normalize_monthly_series_index(y_full)
@@ -444,26 +476,46 @@ def run_qrf_pseudort(
             columns=["eval_date", "target_date", "horizon", "backend", "feature", "importance"]
         )
 
-    score_df = pred_df.copy()
-    use_raw = pred_to_raw_fn is not None or y_raw_full is not None
+    standardized_scores = _point_scores_for_columns(
+        pred_df,
+        pred_col="pred",
+        actual_col="actual",
+    )
+    standardized_scores["score_scale"] = "standardized"
 
-    if use_raw:
-        score_df["pred"] = score_df["pred_raw"]
-        score_df["actual"] = score_df["actual_raw"]
-
-    scores = compute_basic_metrics(score_df)
+    scores = dict(standardized_scores)
     scores["backend"] = backend
-    scores["score_scale"] = "raw" if use_raw else "standardized"
+    scores["standardized"] = dict(standardized_scores)
+
+    use_raw = pred_to_raw_fn is not None or y_raw_full is not None
+    if use_raw:
+        raw_scores = _point_scores_for_columns(
+            pred_df,
+            pred_col="pred_raw",
+            actual_col="actual_raw",
+        )
+        raw_scores["score_scale"] = "raw"
+        scores["raw"] = raw_scores
+        scores["n_raw"] = raw_scores.get("n")
+        scores["rmse_raw"] = raw_scores.get("rmse")
+        scores["mae_raw"] = raw_scores.get("mae")
 
     if backend == "qrf":
-        scores["quantile"] = compute_qrf_density_diagnostics(pred_df, quantiles)
+        quantile_std = _quantile_diag_for_columns(
+            pred_df,
+            quantiles=quantiles,
+            actual_col="actual",
+            raw=False,
+        )
+        scores["quantile"] = quantile_std
+        scores["quantile_standardized"] = quantile_std
+
         if use_raw and all(f"{_q_col_name(q)}_raw" in pred_df.columns for q in quantiles):
-            raw_for_q = pred_df.rename(
-                columns={
-                    "actual_raw": "actual",
-                    **{f"{_q_col_name(q)}_raw": _q_col_name(q) for q in quantiles},
-                }
+            scores["quantile_raw"] = _quantile_diag_for_columns(
+                pred_df,
+                quantiles=quantiles,
+                actual_col="actual_raw",
+                raw=True,
             )
-            scores["quantile_raw"] = compute_qrf_density_diagnostics(raw_for_q, quantiles)
 
     return pred_df, scores
