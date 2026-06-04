@@ -18,6 +18,8 @@ from typing import Iterable, List, Tuple, Optional, Dict, cast
 import numpy as np
 import pandas as pd
 
+from dfm_pipeline.preselection.alignment import align_X_y_dropna, coerce_target_series
+
 # Optional deps
 try:
     import statsmodels.api as sm
@@ -33,20 +35,17 @@ except Exception:  # pragma: no cover
     TimeSeriesSplit = None  # type: ignore[assignment]
 
 # ---------- utilities ----------
-def _align_dropna(X: pd.DataFrame, y: pd.Series) -> Tuple[pd.DataFrame, pd.Series]:
-    common = X.index.intersection(y.index)
-    yc = y.loc[common].dropna()
-    Xc = X.loc[yc.index]
-    Xc = Xc.dropna(axis=1, how="all")
-    return Xc, yc
+def _align_dropna(X: pd.DataFrame, y: pd.Series | pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series]:
+    return align_X_y_dropna(X, y)
 
-def _abs_pearson(x: pd.Series, y: pd.Series) -> float:
-    s = pd.concat([x, y], axis=1).dropna()
+def _abs_pearson(x: pd.Series, y: pd.Series | pd.DataFrame) -> float:
+    yc = coerce_target_series(y)
+    s = pd.concat([x, yc], axis=1).dropna()
     if len(s) < 3:
         return np.nan
     return float(abs(s.iloc[:, 0].corr(s.iloc[:, 1])))
 
-def _rank_features_by_abs_corr(X: pd.DataFrame, y: pd.Series) -> pd.Series:
+def _rank_features_by_abs_corr(X: pd.DataFrame, y: pd.Series | pd.DataFrame) -> pd.Series:
     vals = {c: _abs_pearson(X[c], y) for c in X.columns}
     return pd.Series(vals, dtype="float64").dropna().sort_values(ascending=False)
 

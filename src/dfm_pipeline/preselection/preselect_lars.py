@@ -6,17 +6,16 @@ from typing import Any, Dict, List, Tuple
 import numpy as np
 import pandas as pd
 
+from dfm_pipeline.preselection.alignment import coerce_target_series
 from dfm_pipeline.preselection.baseline_screening.selectors import lars_select
 
 
-def _abs_corr_all(X: pd.DataFrame, y: pd.Series) -> pd.Series:
-    """
-    Compute absolute Pearson correlation of each column in X with y.
-    Used to build a simple ranking table.
-    """
+def _abs_corr_all(X: pd.DataFrame, y: pd.Series | pd.DataFrame) -> pd.Series:
+    """Compute absolute Pearson correlation of each column in X with y."""
+    yc = coerce_target_series(y)
     vals: Dict[str, float] = {}
     for c in X.columns:
-        s = pd.concat([X[c], y], axis=1).dropna()
+        s = pd.concat([X[c], yc], axis=1).dropna()
         if len(s) < 3:
             vals[c] = np.nan
         else:

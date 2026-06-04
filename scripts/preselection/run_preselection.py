@@ -16,6 +16,7 @@ try:
     from dfm_pipeline.preselection.preselect_lars import run_lars_tscv_preselection
     from dfm_pipeline.preselection.preselect_tstat_lm import run_tstat_lm_preselection
     from dfm_pipeline.preselection.preselect_lars_lm import run_lars_lm_preselection
+    from dfm_pipeline.preselection.alignment import align_X_y_dropna, coerce_target_series
 except ImportError:
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
@@ -24,6 +25,7 @@ except ImportError:
     from dfm_pipeline.preselection.preselect_lars import run_lars_tscv_preselection
     from dfm_pipeline.preselection.preselect_tstat_lm import run_tstat_lm_preselection
     from dfm_pipeline.preselection.preselect_lars_lm import run_lars_lm_preselection
+    from dfm_pipeline.preselection.alignment import align_X_y_dropna, coerce_target_series
 
 
 # ---------------------------------------------------------------------
@@ -95,6 +97,20 @@ def load_target(target_csv: str) -> pd.Series:
         y = y.iloc[:, 0]
     return y
 
+
+
+
+def sanitize_ranking_inputs(
+    X_rank: pd.DataFrame,
+    y_rank: pd.Series | pd.DataFrame,
+) -> Tuple[pd.DataFrame, pd.Series]:
+    """Coerce and align ranking inputs before dispatching to selectors."""
+    Xc, yc = align_X_y_dropna(X_rank, y_rank)
+    if Xc.empty:
+        raise ValueError("No usable predictor columns after ranking-input sanitization.")
+    if yc.empty:
+        raise ValueError("No usable target observations after ranking-input sanitization.")
+    return Xc, yc
 
 def load_group_map(path: str) -> Dict[str, str]:
     obj = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -229,25 +245,71 @@ def apply_aggregation_for_ranking(
     agg_default_rule: str | None,
     agg_mode: str,
 ) -> Tuple[pd.DataFrame, pd.Series]:
+    """Build the X/y ranking sample used by preselection methods.
+
+    Important QRF/FRED-MD detail:
+    ``y_target_z__bm_monthly.csv`` is monthly indexed, but the quarterly GDP
+    target is non-missing only in quarter-end months such as Mar/Jun/Sep/Dec.
+    A naive quarterly aggregation of the monthly panel usually produces
+    quarter-start timestamps such as Jan/Apr/Jul/Oct. Directly intersecting
+    those indexes therefore keeps quarter-start target rows, which are NaN,
+    and later sanitization removes every observation.
+
+    The quarterly branch below aligns by Period('Q') and then re-anchors the
+    aggregated panel rows to the actual non-missing target timestamps. This
+    preserves the user's target convention and avoids selecting all-NaN target
+    rows.
+    """
+    y_clean = coerce_target_series(y_train)
+    y_clean.index = pd.DatetimeIndex(pd.to_datetime(y_clean.index, errors="coerce"))
+    y_clean = y_clean.sort_index()
+
     if agg_mode == "none":
-        panel_align, y_align = panel_train.align(y_train, join="inner", axis=0)
+        panel_align, y_align = panel_train.align(y_clean, join="inner", axis=0)
         return panel_align, y_align
 
-    y_q = y_train.copy()
-    y_q.index = pd.DatetimeIndex(y_q.index)
+    # Only non-missing quarterly target observations are valid ranking targets.
+    y_obs = y_clean.dropna().copy()
+    if y_obs.empty:
+        raise ValueError("Target has no non-missing observations in the selected training window.")
 
     if agg_mode == "quarterly":
         panel_q = aggregate_panel_quarterly(panel_train, agg_map, agg_default_rule)
-        idx_common = panel_q.index.intersection(y_q.index)
-        if idx_common.empty:
-            raise ValueError("No overlapping quarterly dates between panel and target after aggregation.")
-        X_rank = panel_q.loc[idx_common].sort_index()
-        y_rank = y_q.loc[idx_common].sort_index()
-        return X_rank, y_rank
+        if panel_q.empty:
+            raise ValueError("Quarterly aggregation produced an empty predictor panel.")
+
+        panel_q = panel_q.copy()
+        panel_q.index = pd.DatetimeIndex(pd.to_datetime(panel_q.index, errors="coerce"))
+        panel_q = panel_q.sort_index()
+
+        panel_periods = pd.PeriodIndex(panel_q.index, freq="Q")
+        target_periods = pd.PeriodIndex(y_obs.index, freq="Q")
+
+        # Collapse to one aggregated row per quarter, then select rows matching
+        # the non-missing target quarters and anchor them at the target dates.
+        panel_by_q = panel_q.copy()
+        panel_by_q.index = panel_periods
+        if panel_by_q.index.has_duplicates:
+            panel_by_q = panel_by_q.groupby(level=0).last()
+
+        common_periods = target_periods.intersection(pd.PeriodIndex(panel_by_q.index, freq="Q"))
+        if common_periods.empty:
+            raise ValueError(
+                "No overlapping quarters between aggregated panel and non-missing target. "
+                "Check target quarter anchoring and aggregation settings."
+            )
+
+        keep_mask = target_periods.isin(common_periods)
+        y_rank = y_obs.loc[keep_mask].copy()
+        selected_periods = pd.PeriodIndex(y_rank.index, freq="Q")
+        X_rank = panel_by_q.loc[selected_periods].copy()
+        X_rank.index = y_rank.index
+
+        return X_rank.sort_index(), y_rank.sort_index()
 
     if agg_mode == "mm":
-        panel_mm = aggregate_panel_mm_quarterly(panel_train, target_index=y_q.index)
-        X_rank, y_rank = panel_mm.align(y_q, join="inner", axis=0)
+        panel_mm = aggregate_panel_mm_quarterly(panel_train, target_index=pd.DatetimeIndex(y_obs.index))
+        X_rank, y_rank = panel_mm.align(y_obs, join="inner", axis=0)
         mask = (~y_rank.isna()) & (~X_rank.isna().any(axis=1))
         X_rank = X_rank.loc[mask].sort_index()
         y_rank = y_rank.loc[mask].sort_index()
@@ -449,6 +511,13 @@ def main() -> None:
         agg_default_rule=agg_default_rule,
         agg_mode=args.agg_mode,
     )
+
+    # Ensure all selectors receive a numeric DataFrame and a one-dimensional
+    # target Series with identical month-start indexes. This prevents the legacy
+    # LARS/t-stat code paths from failing with pandas mixed-dimensional concat
+    # errors when y arrives as a one-column DataFrame or with a different date
+    # anchor.
+    X_rank, y_rank = sanitize_ranking_inputs(X_rank, y_rank)
 
     if args.method_kwargs.strip():
         try:

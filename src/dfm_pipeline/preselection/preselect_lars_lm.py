@@ -21,18 +21,16 @@ from typing import Any, Dict, List, Tuple
 import numpy as np
 import pandas as pd
 
+from dfm_pipeline.preselection.alignment import align_X_y_dropna
+
 try:
     from sklearn.linear_model import lars_path
 except Exception:  # pragma: no cover
     lars_path = None  # type: ignore[assignment]
 
 
-def _align_dropna(X: pd.DataFrame, y: pd.Series) -> Tuple[pd.DataFrame, pd.Series]:
-    common = X.index.intersection(y.index)
-    yc = y.loc[common].dropna()
-    Xc = X.loc[yc.index]
-    Xc = Xc.dropna(axis=1, how="all")
-    return Xc, yc
+def _align_dropna(X: pd.DataFrame, y: pd.Series | pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series]:
+    return align_X_y_dropna(X, y)
 
 
 def _abs_corr_all(X: pd.DataFrame, y: pd.Series) -> pd.Series:
