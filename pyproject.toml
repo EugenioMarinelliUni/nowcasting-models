@@ -15,3 +15,18 @@ package-dir = {"" = "src"}        # tell setuptools the source root is src
 [tool.setuptools.packages.find]
 where = ["src"]                    # discover packages under src
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+norecursedirs = [
+    ".git",
+    ".venv",
+    ".venv312",
+    "legacy",
+    "build",
+    "dist",
+    "dataset",
+    "results",
+    "outputs",
+]
+

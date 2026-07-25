@@ -23,7 +23,7 @@ import numpy as np
 from scipy.linalg import solve_discrete_lyapunov
 
 from .constraints import mm_weights
-from .steady_state import safe_sym
+from .steady_state import project_psd, safe_sym
 
 
 @dataclass(frozen=True)
@@ -171,7 +171,11 @@ def build_state_space(
         if int(p) > 0 and len(Phi_list) != int(p):
             raise ValueError(f"Block {b}: expected {p} Phi matrices, got {len(Phi_list)}")
         T_block = _T_factor_companion(Phi_list, r=rb, p=int(p), ppC=int(ppC))
-        Q_block = _Q_companion_block(params.Q_f_blocks[b], ppC=int(ppC))
+        Q_f = project_psd(
+            np.asarray(params.Q_f_blocks[b], dtype=float),
+            eps=max(float(jitter), 1e-12),
+        )
+        Q_block = _Q_companion_block(Q_f, ppC=int(ppC))
         Tm[sl, sl] = T_block
         Qm[sl, sl] = Q_block
 
@@ -263,7 +267,9 @@ def build_state_space(
             raise ValueError(f"P0_override must have shape {(m, m)}, got {P0.shape}")
         P0 = safe_sym(P0)
     else:
-        if P0_mode == "diffuse":
+        if P0_mode in {"diffuse", "estimated"}:
+            # ``estimated`` uses this diffuse matrix only for the first E-step;
+            # subsequent iterations pass explicit smoothed initial moments.
             P0 = np.eye(m, dtype=float) * 1e4
         elif P0_mode in {"steady_state", "steady_state_factor_diffuse_idio"}:
             P0 = np.zeros((m, m), dtype=float)

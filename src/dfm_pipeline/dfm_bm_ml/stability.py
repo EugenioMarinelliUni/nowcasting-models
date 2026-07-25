@@ -86,4 +86,10 @@ def enforce_var_stability(
         for i in range(len(Phi)):
             Phi[i] *= shrink
 
+    final_radius = spectral_radius(_companion_from_var(Phi, ppC=int(ppC)))
+    if (not np.isfinite(final_radius)) or final_radius > float(radius_target):
+        raise RuntimeError(
+            "Unable to stabilize VAR coefficients after "
+            f"{max_iter} shrinkage iterations; spectral radius={final_radius:.6g}."
+        )
     return Phi

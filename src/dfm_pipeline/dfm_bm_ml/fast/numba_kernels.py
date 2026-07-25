@@ -115,7 +115,8 @@ def update_rho_sig2_from_diag(Ezz_diag, P_lag_diag, a_diag, min_var=1e-8):
 
     cross[t] = E[z_t z_{t-1}] = P_lag_diag[t] + a[t]*a[t-1]
     rho = sum cross / sum E[z_{t-1}^2]
-    sig2 returned is the average E[z_t^2] (floor-applied).
+    sig2 returned is the implied stationary variance q/(1-rho^2), where
+    q is the expected AR(1) innovation variance.
     """
     T = a_diag.shape[0]
     num = 0.0
@@ -128,12 +129,24 @@ def update_rho_sig2_from_diag(Ezz_diag, P_lag_diag, a_diag, min_var=1e-8):
     rho = 0.0
     if den > 0.0:
         rho = num / den
+    if rho > 0.999:
+        rho = 0.999
+    elif rho < -0.999:
+        rho = -0.999
 
-    s2 = 0.0
-    for t in range(T):
-        s2 += Ezz_diag[t]
-    s2 /= T
+    q = 0.0
+    for t in range(1, T):
+        cross = P_lag_diag[t] + a_diag[t] * a_diag[t - 1]
+        q += Ezz_diag[t] - 2.0 * rho * cross + rho * rho * Ezz_diag[t - 1]
+    q /= max(T - 1, 1)
 
+    one_minus_rho2 = 1.0 - rho * rho
+    if one_minus_rho2 < 1e-12:
+        one_minus_rho2 = 1e-12
+    q_floor = min_var * one_minus_rho2
+    if q < q_floor:
+        q = q_floor
+    s2 = q / one_minus_rho2
     if s2 < min_var:
         s2 = min_var
 

@@ -46,6 +46,11 @@ class BMDfmResult:
     config: Optional[BMDfmConfig] = None
     converged: bool = False
     em_cache: Optional[EMStepCache] = None
+    diagnostics: Optional[dict[str, Any]] = None
+
+    @property
+    def n_iter(self) -> int:
+        return len(self.loglik_trace)
 
     @property
     def T(self) -> Any:

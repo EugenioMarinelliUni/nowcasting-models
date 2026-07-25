@@ -108,7 +108,8 @@ def standardize_target(ym: pd.Series, start: str, end: str):
     """
     tr = ym.loc[start:end].dropna()
     mu = float(tr.mean()) if len(tr) else 0.0
-    sd = float(tr.std()) if len(tr) else 1.0
+    # Match PanelScaler/_nanmean_std: population standard deviation (ddof=0).
+    sd = float(tr.std(ddof=0)) if len(tr) else 1.0
     if not np.isfinite(sd) or sd <= 0:
         sd = 1.0
     yz = (ym - mu) / sd

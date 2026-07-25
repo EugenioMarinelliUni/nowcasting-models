@@ -17,7 +17,7 @@ from dfm_pipeline.dfm_dyn.state_space import StateSpaceParams, kalman_filter_smo
 from ..constraints import toolbox_R_mat, kron_quarterly_constraints, mm_weights
 from .constraints_fast import constrained_ls_fast
 from ..state_builder import BMParams, build_state_space
-from ..steady_state import safe_sym
+from ..steady_state import project_psd, safe_sym
 from ..stability import enforce_var_stability
 
 from .numba_kernels import (
@@ -353,11 +353,15 @@ def em_step_ml_fast_numba(
                 S_xx += Ezz[t - 1][np.ix_(lag_stack, lag_stack)]
 
         S_xx = safe_sym(S_xx) + np.eye(S_xx.shape[0], dtype=float) * float(min_var)
-        Phi_stack = S_yx @ np.linalg.inv(S_xx)
+        Phi_stack = np.linalg.solve(S_xx, S_yx.T).T
 
         Phi_list = [Phi_stack[:, lag * rb:(lag + 1) * rb].copy() for lag in range(int(p))]
         if bool(force_var_stability):
             Phi_list = enforce_var_stability(Phi_list, ppC=int(ppC), shrink=float(var_stability_shrink))
+
+        # Stability projection changes the transition coefficients. Rebuild the
+        # stack so Q is computed for the exact Phi matrices returned to callers.
+        Phi_stack = np.hstack(Phi_list)
 
         if bool(NUMBA_AVAILABLE):
             Q_acc, count = accumulate_Q_acc(Ezz, P_lag, a, f0, lag_stack, Phi_stack)
@@ -372,9 +376,7 @@ def em_step_ml_fast_numba(
                 Q_acc += Eff_tt - Phi_stack @ Efl.T - Efl @ Phi_stack.T + Phi_stack @ Ell_tt @ Phi_stack.T
                 count += 1
 
-        Q_b = safe_sym(Q_acc / max(int(count), 1))
-        d = np.diag(Q_b)
-        Q_b[np.diag_indices_from(Q_b)] = _floor(d, float(min_var))
+        Q_b = project_psd(Q_acc / max(int(count), 1), eps=float(min_var))
 
         Phi_blocks_new.append(Phi_list)
         Q_f_blocks_new.append(Q_b)

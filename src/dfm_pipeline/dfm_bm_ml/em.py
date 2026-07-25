@@ -6,6 +6,7 @@ from typing import Optional, Sequence, Tuple
 import numpy as np
 
 from dfm_pipeline.dfm_dyn.state_space import StateSpaceParams, kalman_filter_smoother
+from .ar1 import update_ar1_stationary_moments
 from .constraints import (
     constrained_ls,
     kron_quarterly_constraints,
@@ -13,7 +14,7 @@ from .constraints import (
     toolbox_R_mat,
 )
 from .state_builder import BMParams, build_state_space
-from .steady_state import safe_sym
+from .steady_state import project_psd, safe_sym
 from .stability import enforce_var_stability
 
 
@@ -143,7 +144,7 @@ def em_step_ml(
             Ell += Ezz[t - 1][np.ix_(lag_stack, lag_stack)]
 
         Ell = safe_sym(Ell) + np.eye(Ell.shape[0], dtype=float) * float(min_var)
-        Phi_stack = Effl @ np.linalg.inv(Ell)  # (rb, rb*p)
+        Phi_stack = np.linalg.solve(Ell, Effl.T).T  # (rb, rb*p)
 
         Phi_b_new = [Phi_stack[:, lag * rb : (lag + 1) * rb].copy() for lag in range(int(p))]
 
@@ -151,6 +152,11 @@ def em_step_ml(
             Phi_b_new = enforce_var_stability(
                 Phi_b_new, r=rb, p=int(p), ppC=int(ppC), shrink=float(var_stability_shrink)
             )
+
+        # Q must be updated for the same transition coefficients that are
+        # returned. Stability projection changes Phi, so rebuild the stacked
+        # matrix before evaluating the innovation covariance sufficient statistic.
+        Phi_stack = np.hstack(Phi_b_new)
 
         Phi_blocks_new.append(Phi_b_new)
 
@@ -164,9 +170,7 @@ def em_step_ml(
             Q_acc += Eff_tt - Phi_stack @ Efl.T - Efl @ Phi_stack.T + Phi_stack @ Ell_tt @ Phi_stack.T
             count += 1
 
-        Q_b = safe_sym(Q_acc / max(count, 1))
-        d = np.diag(Q_b)
-        Q_b[np.diag_indices_from(Q_b)] = _floor(d, float(min_var))
+        Q_b = project_psd(Q_acc / max(count, 1), eps=float(min_var))
         Q_f_blocks_new.append(Q_b)
 
     # -----------------------------
@@ -178,17 +182,12 @@ def em_step_ml(
     if bool(idio_ar1):
         for i_m in range(int(nM)):
             s_idx = idx_m.start + i_m
-            num = 0.0
-            den = 0.0
-            for t in range(1, Y.shape[0]):
-                cross = P_lag[t][s_idx, s_idx] + a[t, s_idx] * a[t - 1, s_idx]
-                prev = Ezz[t - 1][s_idx, s_idx]
-                num += float(cross)
-                den += float(prev)
-            if den > 0.0:
-                rho_m_new[i_m] = num / den
-            rho_m_new[i_m] = float(np.clip(rho_m_new[i_m], -0.999, 0.999))
-            sig2_m_new[i_m] = float(max(np.mean(Ezz[:, s_idx, s_idx]), float(min_var)))
+            rho_m_new[i_m], sig2_m_new[i_m] = update_ar1_stationary_moments(
+                Ezz[:, s_idx, s_idx],
+                P_lag[:, s_idx, s_idx],
+                a[:, s_idx],
+                min_var=float(min_var),
+            )
 
     # -----------------------------
     # Update quarterly idios
@@ -198,17 +197,12 @@ def em_step_ml(
 
     for j in range(int(nQ)):
         s0 = idx_q.start + 5 * j
-        num = 0.0
-        den = 0.0
-        for t in range(1, Y.shape[0]):
-            cross = P_lag[t][s0, s0] + a[t, s0] * a[t - 1, s0]
-            prev = Ezz[t - 1][s0, s0]
-            num += float(cross)
-            den += float(prev)
-        if den > 0.0:
-            rho_q_new[j] = num / den
-        rho_q_new[j] = float(np.clip(rho_q_new[j], -0.999, 0.999))
-        sig2_q_new[j] = float(max(np.mean(Ezz[:, s0, s0]), float(min_var)))
+        rho_q_new[j], sig2_q_new[j] = update_ar1_stationary_moments(
+            Ezz[:, s0, s0],
+            P_lag[:, s0, s0],
+            a[:, s0],
+            min_var=float(min_var),
+        )
 
     # -----------------------------
     # Update monthly loadings Lambda_m with block restrictions

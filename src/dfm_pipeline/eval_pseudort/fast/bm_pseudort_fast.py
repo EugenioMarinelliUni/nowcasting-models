@@ -3,12 +3,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from statistics import NormalDist
 from types import SimpleNamespace
 from typing import Any, Callable, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 
+from dfm_pipeline.dfm_bm_ml.forecasting import (
+    observation_predictive_moments,
+    propagate_state_moments,
+)
+from dfm_pipeline.dfm_bm_ml.scaling import PanelScaler, TargetOutputScaler
+from dfm_pipeline.eval_pseudort.vintages import VintageProvider, VintageSnapshot
 from dfm_pipeline.preprocessing.bm_inputs import validate_quarter_end_target_alignment
 from dfm_pipeline.utils.threadpool import limit_blas_threads
 
@@ -32,22 +39,23 @@ def _quarter_end_month(dt: pd.Timestamp) -> pd.Timestamp:
     return q.end_time.to_period("M").to_timestamp(how="start")
 
 
+def _horizon_target_date(dt: pd.Timestamp, horizon: str) -> pd.Timestamp:
+    q = pd.Timestamp(dt).to_period("Q")
+    if horizon == "bac":
+        q = q - 1
+    elif horizon == "now":
+        pass
+    elif horizon == "for":
+        q = q + 1
+    else:
+        raise ValueError(f"Unsupported horizon: {horizon!r}")
+    return q.end_time.to_period("M").to_timestamp(how="start")
+
+
 def _months_diff(a: pd.Timestamp, b: pd.Timestamp) -> int:
     a = pd.Timestamp(a).to_period("M").to_timestamp(how="start")
     b = pd.Timestamp(b).to_period("M").to_timestamp(how="start")
     return (a.year - b.year) * 12 + (a.month - b.month)
-
-
-def _safe_mean_std(x: np.ndarray) -> tuple[float, float]:
-    x = np.asarray(x, float)
-    m = np.isfinite(x)
-    if int(m.sum()) == 0:
-        return 0.0, 1.0
-    mu = float(np.mean(x[m]))
-    sd = float(np.std(x[m]))
-    if (not np.isfinite(sd)) or sd == 0.0:
-        sd = 1.0
-    return mu, sd
 
 
 def _squeeze_last(M: np.ndarray) -> np.ndarray:
@@ -183,6 +191,36 @@ def _forecast_state(Tmat: np.ndarray, a_last: np.ndarray, steps: int) -> np.ndar
     return a
 
 
+def _target_location_scale(
+    res: Any,
+    *,
+    n_obs_expected: int,
+    scaling_mode: str,
+) -> tuple[float, float]:
+    """Return the target scaler actually used by the fitted vintage.
+
+    Parameters are estimated in the transformed observation space, so forecasts
+    must be inverted with the scaler attached to that same fit. Falling back to
+    full-sample moments would both use the wrong normalization and leak future
+    target information into early pseudo-real-time vintages.
+    """
+    scaler = getattr(res, "scaler", None)
+    if scaler is None:
+        if scaling_mode == "external_frozen":
+            return 0.0, 1.0
+        raise AttributeError(
+            "A fitted vintage using internal scaling must expose its PanelScaler; "
+            "cannot invert forecasts safely without it."
+        )
+    if not isinstance(scaler, PanelScaler):
+        raise TypeError(f"Expected PanelScaler on fit result, got {type(scaler)!r}.")
+    if scaler.mu.shape[0] != int(n_obs_expected):
+        raise ValueError(
+            f"Fit scaler has {scaler.mu.shape[0]} variables; expected {n_obs_expected}."
+        )
+    return scaler.column_location_scale(-1)
+
+
 # -----------------------------------------------------------------------------
 # Warm-start run state (refit mode)
 # -----------------------------------------------------------------------------
@@ -202,18 +240,22 @@ def _smooth_fixed_params(
     X_v: pd.DataFrame,
     y_v: pd.Series,
     params_fixed: Any,
+    scaler_fixed: PanelScaler,
     model_config: Any,
 ):
     from dfm_pipeline.dfm_bm_ml.state_builder import build_state_space
-    from dfm_pipeline.dfm_dyn.state_space_new import kalman_filter, kalman_smoother
+    from dfm_pipeline.dfm_dyn.state_space import StateSpaceParams, kalman_filter_smoother
 
-    Y_monthly = X_v.to_numpy(dtype=float)
-    y_quarterly = y_v.to_numpy(dtype=float)
+    Y_raw = np.concatenate(
+        [X_v.to_numpy(dtype=float), y_v.to_numpy(dtype=float)[:, None]],
+        axis=1,
+    )
+    Y_scaled = scaler_fixed.transform(Y_raw)
 
-    ss_out = _call_supported(
+    Tm, Qm, C_meas, R_meas, a0, P0, _idx = _call_supported(
         build_state_space,
         params=params_fixed,
-        nM=int(Y_monthly.shape[1]),
+        nM=int(X_v.shape[1]),
         nQ=1,
         r_by_block=tuple(int(x) for x in getattr(model_config, "r_by_block")),
         p=int(getattr(model_config, "p")),
@@ -222,47 +264,22 @@ def _smooth_fixed_params(
         quarterly_meas_var_floor=float(getattr(model_config, "quarterly_meas_var_floor", 1e-6)),
         idio_ar1=bool(getattr(model_config, "idio_ar1", True)),
         jitter=float(getattr(model_config, "jitter", 1e-8)),
-        P0_mode=str(getattr(model_config, "P0_mode", "diffuse")),
+        P0_mode=str(getattr(model_config, "P0_mode", "steady_state")),
         a0_override=None,
         P0_override=None,
     )
-
-    Tm, Qm, C_meas, R_meas, a0, P0, _idx = ss_out
-
-    Y_obs = np.concatenate([Y_monthly, y_quarterly[:, None]], axis=1)
-
-    kf = _call_supported(
-        kalman_filter,
-        Y=Y_obs,
-        y=Y_obs,
-        Z=C_meas,
-        T=Tm,
-        Q=Qm,
-        R=R_meas,
-        a0=a0,
-        P0=P0,
+    R_used = np.diag(R_meas) if np.asarray(R_meas).ndim == 2 else np.asarray(R_meas)
+    smooth = kalman_filter_smoother(
+        Y_scaled,
+        StateSpaceParams(T=Tm, Q=Qm, C=C_meas, R=R_used, a0=a0, P0=P0),
     )
-
-    try:
-        ks = kalman_smoother(kf)
-    except TypeError:
-        try:
-            ks = kalman_smoother(kf_res=kf)
-        except TypeError:
-            ks = _call_supported(
-                kalman_smoother,
-                kf_res=kf,
-                kf=kf,
-                Y=Y_obs,
-                y=Y_obs,
-                Z=C_meas,
-                T=Tm,
-                Q=Qm,
-                R=R_meas,
-            )
-
-    a_smooth = np.asarray(_to_attr(ks, "a_smooth"), dtype=float)
-    return SimpleNamespace(A=Tm, C=C_meas, a_smooth=a_smooth)
+    return SimpleNamespace(
+        A=Tm, Q=Qm, C=C_meas, R=R_meas,
+        a_smooth=np.asarray(smooth.a_smooth, dtype=float),
+        P_smooth=np.asarray(smooth.P_smooth, dtype=float),
+        scaler=scaler_fixed, converged=True,
+        diagnostics={"fixed_parameters": True, "final_loglik": float(smooth.loglik)},
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -313,6 +330,23 @@ class EvalConfig:
     gdp_rel: int = 0
     horizons: Tuple[str, ...] = ("now",)
     no_qe_leak: bool = False
+    prediction_interval_levels: Tuple[float, ...] = (0.68, 0.90, 0.95)
+    require_convergence: bool = False
+    on_nonconvergence: str = "raise"  # raise|skip|keep
+    apply_masks_to_vintage_provider: bool = False
+    vintage_as_of_rule: str = "month_start"  # month_start|month_end
+
+    def validate(self) -> None:
+        if self.on_nonconvergence not in {"raise", "skip", "keep"}:
+            raise ValueError("on_nonconvergence must be raise, skip, or keep.")
+        if self.vintage_as_of_rule not in {"month_start", "month_end"}:
+            raise ValueError("vintage_as_of_rule must be month_start or month_end.")
+        for h in self.horizons:
+            if h not in {"bac", "now", "for"}:
+                raise ValueError(f"Unsupported horizon: {h!r}")
+        for level in self.prediction_interval_levels:
+            if not (0.0 < float(level) < 1.0):
+                raise ValueError("Prediction interval levels must lie in (0,1).")
 
 
 # -----------------------------------------------------------------------------
@@ -331,15 +365,25 @@ def run_pseudo_rt_eval_fast(
     train_end: Optional[str] = None,
     train_max_iter: Optional[int] = None,
     blas_threads: int | None = None,
+    vintage_provider: Optional[VintageProvider] = None,
+    target_output_scaler: Optional[TargetOutputScaler] = None,
 ) -> Tuple[pd.DataFrame, dict]:
+    """Run a leakage-safe pseudo-real-time or true-vintage DFM evaluation.
+
+    ``X_full`` and ``y_full`` define the common calendar, predictor order and the
+    evaluation target.  Supplying ``vintage_provider`` replaces the masked
+    revised-data information set with an actual historical snapshot at every
+    evaluation date.  The provider is optional and does not alter the default
+    revised-panel pseudo-real-time workflow.
+    """
     from tqdm.auto import tqdm
 
+    eval_cfg.validate()
     if blas_threads is not None and int(blas_threads) > 0:
         limit_blas_threads(int(blas_threads))
 
     X_full = X_full.copy()
     X_full.index = _normalize_month_start(X_full.index)
-
     y_full = y_full.copy()
     y_full.index = _normalize_month_start(y_full.index)
     validate_quarter_end_target_alignment(y_full, name="y_full")
@@ -347,45 +391,72 @@ def run_pseudo_rt_eval_fast(
     idx = X_full.index.intersection(y_full.index).sort_values()
     X_full = X_full.loc[idx]
     y_full = y_full.loc[idx]
+    if not idx.is_unique:
+        raise ValueError("The monthly evaluation index must be unique.")
 
     eval_start = pd.Timestamp(eval_cfg.eval_start).to_period("M").to_timestamp(how="start")
     eval_end = pd.Timestamp(eval_cfg.eval_end).to_period("M").to_timestamp(how="start")
 
     delay_map = None
-    if getattr(eval_cfg, "delay_style", "none") == "json_map":
+    if eval_cfg.delay_style == "json_map":
         import json
-
         if eval_cfg.delay_json is None:
             raise ValueError("delay_style=json_map requires delay_json")
         with open(eval_cfg.delay_json, "r", encoding="utf-8") as f:
             delay_map = json.load(f)
 
-    horizons = tuple(getattr(eval_cfg, "horizons", ("now",)))
-
+    horizons = tuple(eval_cfg.horizons)
     scaling_mode = str(getattr(model_config, "scaling_mode", "external_frozen"))
-    if scaling_mode == "external_frozen":
-        mu_y, sd_y = 0.0, 1.0
-    else:
-        mu_y, sd_y = _safe_mean_std(y_full.to_numpy(dtype=float))
+    output_scaler = target_output_scaler or TargetOutputScaler()
 
+    # Warm starts are only directly reusable under a fixed observation scale.
+    warm_start_effective = bool(warm_start and scaling_mode == "external_frozen")
     min_T = int(max(12, 3 * max(1, int(getattr(model_config, "p", 1))) + 5))
     min_q_obs = 1
 
+    def get_snapshot(t: pd.Timestamp) -> tuple[pd.DataFrame, pd.Series, dict[str, Any]]:
+        t = pd.Timestamp(t).to_period("M").to_timestamp(how="start")
+        cal = idx[idx <= t]
+        metadata: dict[str, Any]
+        if vintage_provider is None:
+            X_v = X_full.loc[cal].copy()
+            y_v = y_full.loc[cal].copy()
+            metadata = {"mode": "revised_panel_with_release_masks"}
+        else:
+            as_of = t if eval_cfg.vintage_as_of_rule == "month_start" else (t + pd.offsets.MonthEnd(0) + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1))
+            snapshot: VintageSnapshot = vintage_provider.get_vintage(as_of)
+            X_v = snapshot.X.copy()
+            y_v = snapshot.y.copy()
+            X_v.index = _normalize_month_start(X_v.index)
+            y_v.index = _normalize_month_start(y_v.index)
+            X_v = X_v.reindex(index=cal, columns=X_full.columns)
+            y_v = y_v.reindex(index=cal)
+            metadata = dict(snapshot.metadata)
+            metadata.setdefault("mode", "historical_vintage")
+
+        apply_masks = vintage_provider is None or bool(eval_cfg.apply_masks_to_vintage_provider)
+        if apply_masks:
+            X_v = _apply_delay_mask(
+                X_v,
+                eval_date=t,
+                delay_style=str(eval_cfg.delay_style),
+                delay_map=delay_map,
+            )
+            y_v = _mask_quarterly_target_release(y_v, eval_date=t, gdp_rel=int(eval_cfg.gdp_rel))
+            y_v = _apply_quarter_end_leakage_guard(
+                y_v, t, no_qe_leak=bool(eval_cfg.no_qe_leak)
+            )
+        return X_v, y_v, metadata
+
     params_fixed = None
+    scaler_fixed: Optional[PanelScaler] = None
     if fixed_params:
         if train_end is None:
             raise ValueError("fixed_params=True requires train_end")
         train_end_ts = pd.Timestamp(train_end).to_period("M").to_timestamp(how="start")
-
-        X_tr = X_full.loc[:train_end_ts]
-        y_tr = y_full.loc[:train_end_ts]
-
+        X_tr, y_tr_m, _train_meta = get_snapshot(train_end_ts)
         if len(X_tr) < min_T:
             raise ValueError(f"Training window too short. len(X_tr)={len(X_tr)} < {min_T}")
-
-        y_tr_m = _mask_quarterly_target_release(y_tr, eval_date=train_end_ts, gdp_rel=int(eval_cfg.gdp_rel))
-        y_tr_m = _apply_quarter_end_leakage_guard(y_tr_m, train_end_ts, no_qe_leak=bool(eval_cfg.no_qe_leak))
-
         if np.isfinite(y_tr_m.to_numpy(dtype=float)).sum() < min_q_obs:
             raise ValueError("Training window has no quarterly observations after masking.")
 
@@ -395,10 +466,7 @@ def run_pseudo_rt_eval_fast(
                 cfg_tr = cfg_tr.__class__(**cfg_tr.__dict__)
             except Exception:
                 pass
-            try:
-                cfg_tr.max_iter = int(train_max_iter)
-            except Exception:
-                pass
+            cfg_tr.max_iter = int(train_max_iter)
 
         res_tr = _fit_one_vintage_em(
             X_v=X_tr,
@@ -409,50 +477,38 @@ def run_pseudo_rt_eval_fast(
             warm_start=False,
             verbose_em=True,
         )
+        if bool(eval_cfg.require_convergence) and not bool(getattr(res_tr, "converged", False)):
+            if eval_cfg.on_nonconvergence == "raise":
+                raise RuntimeError("Fixed-parameter training fit did not converge.")
         if not hasattr(res_tr, "params"):
             raise AttributeError("Training fit result has no .params for fixed_params mode.")
         params_fixed = res_tr.params
+        scaler_fixed = getattr(res_tr, "scaler", None)
+        if not isinstance(scaler_fixed, PanelScaler):
+            raise TypeError("Training fit must return a PanelScaler for fixed_params evaluation.")
 
-    out_rows = []
-    run_state = PRTRunState() if (warm_start and (not fixed_params)) else None
+    out_rows: list[dict[str, Any]] = []
+    run_state = PRTRunState() if (warm_start_effective and not fixed_params) else None
+    vintages = [t for t in idx if eval_start <= t <= eval_end]
 
-    vintages = [t for t in idx if (t >= eval_start and t <= eval_end)]
-    pbar = tqdm(vintages, desc="Pseudo-RT vintages", unit="vintage")
+    pbar = tqdm(vintages, desc="Pseudo/real-time vintages", unit="vintage")
     for t in pbar:
-        pbar.set_postfix_str(pd.Timestamp(t).strftime("%Y-%m"))
-
-        X_v = X_full.loc[:t]
-        y_v = y_full.loc[:t]
-
-        if len(X_v) < min_T:
-            continue
-
-        X_v = _apply_delay_mask(
-            X_v,
-            eval_date=pd.Timestamp(t),
-            delay_style=str(getattr(eval_cfg, "delay_style", "none")),
-            delay_map=delay_map,
-        )
-
-        y_v = _mask_quarterly_target_release(
-            y_v,
-            eval_date=pd.Timestamp(t),
-            gdp_rel=int(getattr(eval_cfg, "gdp_rel", 0)),
-        )
-
-        y_v = _apply_quarter_end_leakage_guard(
-            y_v,
-            pd.Timestamp(t),
-            no_qe_leak=bool(getattr(eval_cfg, "no_qe_leak", False)),
-        )
-
-        if np.isfinite(y_v.to_numpy(dtype=float)).sum() < min_q_obs:
+        t = pd.Timestamp(t)
+        pbar.set_postfix_str(t.strftime("%Y-%m"))
+        X_v, y_v, vintage_meta = get_snapshot(t)
+        if len(X_v) < min_T or np.isfinite(y_v.to_numpy(dtype=float)).sum() < min_q_obs:
             continue
 
         if fixed_params:
-            if params_fixed is None:
-                raise RuntimeError("fixed_params=True but params_fixed is None")
-            res = _smooth_fixed_params(X_v=X_v, y_v=y_v, params_fixed=params_fixed, model_config=model_config)
+            if params_fixed is None or scaler_fixed is None:
+                raise RuntimeError("Fixed parameters/scaler are unavailable.")
+            res = _smooth_fixed_params(
+                X_v=X_v,
+                y_v=y_v,
+                params_fixed=params_fixed,
+                scaler_fixed=scaler_fixed,
+                model_config=model_config,
+            )
         else:
             res = _fit_one_vintage_em(
                 X_v=X_v,
@@ -460,61 +516,127 @@ def run_pseudo_rt_eval_fast(
                 fit_fn=fit_fn,
                 model_config=model_config,
                 run_state=run_state,
-                warm_start=warm_start,
+                warm_start=warm_start_effective,
                 verbose_em=False,
             )
 
+        fit_converged = bool(getattr(res, "converged", True))
+        if bool(eval_cfg.require_convergence) and not fit_converged:
+            if eval_cfg.on_nonconvergence == "raise":
+                raise RuntimeError(f"DFM fit did not converge at vintage {t:%Y-%m}.")
+            if eval_cfg.on_nonconvergence == "skip":
+                continue
+
         n_obs_expected = int(X_v.shape[1] + 1)
-        Tmat, Z = _extract_transition_and_measurement(res, n_obs_expected=n_obs_expected)
+        A, C = _extract_transition_and_measurement(res, n_obs_expected=n_obs_expected)
+        Q = np.asarray(getattr(res, "Q", np.zeros_like(A)), dtype=float)
+        R = np.asarray(getattr(res, "R", np.zeros(n_obs_expected)), dtype=float)
+        R_q = float(R[-1]) if R.ndim == 1 else float(R[-1, -1])
+        mu_y, sd_y = _target_location_scale(
+            res,
+            n_obs_expected=n_obs_expected,
+            scaling_mode=scaling_mode,
+        )
 
         a_smooth = np.asarray(_to_attr(res, "a_smooth"), dtype=float)
-        a_last = a_smooth[-1, :]
+        P_smooth = np.asarray(
+            getattr(res, "P_smooth", np.zeros((a_smooth.shape[0], A.shape[0], A.shape[0]))),
+            dtype=float,
+        )
+        if a_smooth.shape[0] != len(X_v) or P_smooth.shape[0] != len(X_v):
+            raise ValueError("Smoothed state output is not aligned with the vintage panel.")
 
-        Zq = Z[-1, :]
-        moq = _month_in_quarter(pd.Timestamp(t))
+        Zq = C[-1, :]
+        moq = _month_in_quarter(t)
+        last_date = pd.Timestamp(X_v.index[-1])
+        diag = getattr(res, "diagnostics", None) or {}
 
         for h in horizons:
-            if h != "now":
-                raise ValueError(f"Unsupported horizon: {h!r}")
+            target_date = _horizon_target_date(t, h)
+            actual_input = float(y_full.loc[target_date]) if target_date in y_full.index else float("nan")
 
-            target_date = _quarter_end_month(pd.Timestamp(t))
-
-            if target_date not in idx:
-                pred_scaled = float("nan")
-                actual_raw = float("nan")
+            if target_date < X_v.index[0]:
+                pred_model = pred_var_model = float("nan")
+            elif target_date <= last_date and target_date in X_v.index:
+                pos = int(X_v.index.get_loc(target_date))
+                moments = observation_predictive_moments(
+                    a_smooth[pos], P_smooth[pos], Zq, R_q
+                )
+                pred_model = moments.observation_mean
+                pred_var_model = moments.observation_var
             else:
-                steps = _months_diff(pd.Timestamp(target_date), pd.Timestamp(t))
-                if steps < 0:
-                    steps = 0
-                a_for = _forecast_state(Tmat, a_last, steps)
-                pred_scaled = float(Zq @ a_for)
-                actual_raw = float(y_full.loc[target_date]) if target_date in y_full.index else float("nan")
+                steps = max(0, _months_diff(target_date, last_date))
+                a_for, P_for = propagate_state_moments(
+                    a_smooth[-1], P_smooth[-1], A, Q, steps
+                )
+                moments = observation_predictive_moments(a_for, P_for, Zq, R_q)
+                pred_model = moments.observation_mean
+                pred_var_model = moments.observation_var
 
-            pred_raw = float(pred_scaled * sd_y + mu_y) if np.isfinite(pred_scaled) else float("nan")
-            actual_scaled = (
-                float((actual_raw - mu_y) / sd_y) if np.isfinite(actual_raw) and sd_y != 0 else float("nan")
+            pred_sd_model = (
+                float(np.sqrt(max(pred_var_model, 0.0)))
+                if np.isfinite(pred_var_model)
+                else float("nan")
             )
-
-            out_rows.append(
-                {
-                    "eval_date": pd.Timestamp(t),
-                    "moq": int(moq),
-                    "horizon": h,
-                    "target_date": pd.Timestamp(target_date),
-                    "pred_scaled": pred_scaled,
-                    "actual_scaled": actual_scaled,
-                    "pred_raw": pred_raw,
-                    "actual_raw": actual_raw,
-                    "pred": pred_raw,
-                    "actual": actual_raw,
-                    "scaling_mode": scaling_mode,
-                    "fixed_params": bool(fixed_params),
-                    "no_qe_leak": bool(getattr(eval_cfg, "no_qe_leak", False)),
-                    "gdp_rel": int(getattr(eval_cfg, "gdp_rel", 0)),
-                }
+            pred_input = pred_model * sd_y + mu_y if np.isfinite(pred_model) else float("nan")
+            pred_sd_input = pred_sd_model * abs(sd_y) if np.isfinite(pred_sd_model) else float("nan")
+            actual_model = (
+                (actual_input - mu_y) / sd_y
+                if np.isfinite(actual_input) and sd_y != 0.0
+                else float("nan")
             )
+            pred_raw = output_scaler.to_output(pred_input) if np.isfinite(pred_input) else float("nan")
+            actual_raw = output_scaler.to_output(actual_input) if np.isfinite(actual_input) else float("nan")
+            pred_sd_raw = output_scaler.scale_sd(pred_sd_input) if np.isfinite(pred_sd_input) else float("nan")
 
-    pred_df = pd.DataFrame(out_rows).sort_values(["eval_date", "horizon", "moq"]).reset_index(drop=True)
+            row: dict[str, Any] = {
+                "eval_date": t,
+                "moq": int(moq),
+                "horizon": h,
+                "target_date": pd.Timestamp(target_date),
+                "pred_model_scale": float(pred_model),
+                "actual_model_scale": float(actual_model),
+                "pred_input_scale": float(pred_input),
+                "actual_input_scale": float(actual_input),
+                "pred_sd_model_scale": float(pred_sd_model),
+                "pred_sd_input_scale": float(pred_sd_input),
+                "pred_raw": float(pred_raw),
+                "actual_raw": float(actual_raw),
+                "pred_sd_raw": float(pred_sd_raw),
+                # Backward-compatible aliases.
+                "pred_scaled": float(pred_model),
+                "actual_scaled": float(actual_model),
+                "pred": float(pred_raw),
+                "actual": float(actual_raw),
+                "scaling_mode": scaling_mode,
+                "output_scale_label": output_scaler.label,
+                "scaler_mu_y": float(mu_y),
+                "scaler_sd_y": float(sd_y),
+                "output_scaler_mean": float(output_scaler.mean),
+                "output_scaler_std": float(output_scaler.std),
+                "warm_start_used": warm_start_effective,
+                "fixed_params": bool(fixed_params),
+                "vintage_mode": str(vintage_meta.get("mode", "unknown")),
+                "em_converged": fit_converged,
+                "em_iterations": int(diag.get("iterations", len(getattr(res, "loglik_trace", [])))),
+                "em_final_loglik": float(diag.get("final_loglik", float("nan"))),
+                "em_min_loglik_increment": float(diag.get("minimum_loglik_increment", float("nan"))),
+                "em_rejected_steps": int(diag.get("rejected_steps", 0)),
+                "no_qe_leak": bool(eval_cfg.no_qe_leak),
+                "gdp_rel": int(eval_cfg.gdp_rel),
+            }
+
+            for level in eval_cfg.prediction_interval_levels:
+                tag = int(round(100.0 * float(level)))
+                z = NormalDist().inv_cdf(0.5 * (1.0 + float(level)))
+                row[f"pi{tag}_lower_raw"] = float(pred_raw - z * pred_sd_raw)
+                row[f"pi{tag}_upper_raw"] = float(pred_raw + z * pred_sd_raw)
+
+            out_rows.append(row)
+
+    pred_df = pd.DataFrame(out_rows)
+    if not pred_df.empty:
+        pred_df = pred_df.sort_values(["eval_date", "horizon", "moq"]).reset_index(drop=True)
     scores = compute_scores(pred_df)
     return pred_df, scores
 
@@ -524,30 +646,65 @@ def run_pseudo_rt_eval_fast(
 # -----------------------------------------------------------------------------
 
 def compute_scores(pred_df: pd.DataFrame) -> dict:
+    if pred_df.empty:
+        return {"rmse": float("nan"), "directional_accuracy": float("nan"), "by_moq": {}}
+
     df = pred_df.copy()
-    m = np.isfinite(df["pred"].to_numpy(dtype=float)) & np.isfinite(df["actual"].to_numpy(dtype=float))
-    if int(m.sum()) == 0:
-        return {"rmse": float("nan"), "directional_accuracy": float("nan")}
+    mask = np.isfinite(df["pred"].to_numpy(float)) & np.isfinite(df["actual"].to_numpy(float))
+    if int(mask.sum()) == 0:
+        return {"rmse": float("nan"), "directional_accuracy": float("nan"), "by_moq": {}}
 
-    e = df.loc[m, "pred"].to_numpy(dtype=float) - df.loc[m, "actual"].to_numpy(dtype=float)
-    rmse = float(np.sqrt(np.mean(e * e)))
+    err = df.loc[mask, "pred"].to_numpy(float) - df.loc[mask, "actual"].to_numpy(float)
+    out: dict[str, Any] = {
+        "rmse": float(np.sqrt(np.mean(err * err))),
+        "mae": float(np.mean(np.abs(err))),
+        "n_obs": int(mask.sum()),
+    }
 
-    dff = df[df["horizon"] == "now"].copy()
-    if dff.empty:
-        da = float("nan")
+    now = df[df["horizon"] == "now"].sort_values(["target_date", "moq"])
+    now = now.groupby("target_date").tail(1) if not now.empty else now
+    if len(now) < 2:
+        out["directional_accuracy"] = float("nan")
     else:
-        dff = dff.sort_values(["target_date", "moq"]).groupby("target_date").tail(1)
-        p = dff["pred"].to_numpy(float)
-        a = dff["actual"].to_numpy(float)
-        mm = np.isfinite(p) & np.isfinite(a)
-        p = p[mm]
-        a = a[mm]
-        if p.size < 2:
-            da = float("nan")
-        else:
-            da = float(np.mean((np.diff(p) >= 0) == (np.diff(a) >= 0)))
+        p = now["pred"].to_numpy(float)
+        a = now["actual"].to_numpy(float)
+        valid = np.isfinite(p) & np.isfinite(a)
+        p, a = p[valid], a[valid]
+        out["directional_accuracy"] = (
+            float(np.mean((np.diff(p) >= 0) == (np.diff(a) >= 0)))
+            if len(p) >= 2 else float("nan")
+        )
 
-    return {"rmse": rmse, "directional_accuracy": da}
+    by_moq: dict[str, dict[str, float]] = {}
+    for moq, sub in df[df["horizon"] == "now"].groupby("moq"):
+        valid = np.isfinite(sub["pred"].to_numpy(float)) & np.isfinite(sub["actual"].to_numpy(float))
+        e = sub.loc[valid, "pred"].to_numpy(float) - sub.loc[valid, "actual"].to_numpy(float)
+        by_moq[f"m{int(moq)}"] = {
+            "rmse": float(np.sqrt(np.mean(e * e))) if e.size else float("nan"),
+            "mae": float(np.mean(np.abs(e))) if e.size else float("nan"),
+            "n_obs": int(e.size),
+        }
+    out["by_moq"] = by_moq
+
+    coverage: dict[str, float] = {}
+    for col in df.columns:
+        if col.startswith("pi") and col.endswith("_lower_raw"):
+            tag = col[2:].split("_")[0]
+            upper = f"pi{tag}_upper_raw"
+            if upper not in df.columns:
+                continue
+            valid = (
+                np.isfinite(df[col].to_numpy(float))
+                & np.isfinite(df[upper].to_numpy(float))
+                & np.isfinite(df["actual_raw"].to_numpy(float))
+            )
+            if int(valid.sum()):
+                actual = df.loc[valid, "actual_raw"]
+                coverage[f"pi{tag}"] = float(
+                    np.mean((actual >= df.loc[valid, col]) & (actual <= df.loc[valid, upper]))
+                )
+    out["interval_coverage"] = coverage
+    return out
 
 
 def _miq_pivot(pred_df: pd.DataFrame) -> pd.DataFrame:

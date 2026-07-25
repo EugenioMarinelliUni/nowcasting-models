@@ -3,13 +3,14 @@ from __future__ import annotations
 from typing import Optional
 
 import numpy as np
-from tqdm.auto import tqdm
 
 from dfm_pipeline.dfm_dyn.state_space import StateSpaceParams, kalman_filter_smoother
 
 from .em_fast import EMStepCache, build_em_cache, em_step_ml_fast
 from .init import init_params_pca as init_params_pca_legacy
 from .init_toolbox import init_params_pca_toolbox
+from ..fit_core import run_em_loop
+from ..identification import identify_signs
 from ..scaling import scale_panel
 from ..spec import BMDfmConfig
 from ..state_builder import BMParams, build_state_space
@@ -25,20 +26,6 @@ def _as_blocks_array(blocks: Optional[list[int]], nM: int) -> Optional[np.ndarra
     return arr
 
 
-def _converged(loglik_trace: list[float], tol: float, mode: str) -> bool:
-    if len(loglik_trace) < 2:
-        return False
-    ll_new = float(loglik_trace[-1])
-    ll_old = float(loglik_trace[-2])
-    if (not np.isfinite(ll_new)) or (not np.isfinite(ll_old)):
-        return False
-    d = ll_new - ll_old
-    if mode == "absolute_ll":
-        return abs(d) < tol
-    denom = max(1.0, abs(ll_old))
-    return abs(d) / denom < tol
-
-
 def _initialize_params(Y: np.ndarray, nM: int, config: BMDfmConfig) -> BMParams:
     method = str(getattr(config, "init_missing_method", "legacy_mean"))
     if method in {"toolbox_spline", "linear_interp", "legacy_mean", "legacy_ffill"}:
@@ -46,27 +33,14 @@ def _initialize_params(Y: np.ndarray, nM: int, config: BMDfmConfig) -> BMParams:
     return init_params_pca_legacy(Y, nM=nM, config=config)
 
 
-
-def _kalman_R_from_measurement_covariance(R: np.ndarray) -> np.ndarray:
-    """Return R in the representation preferred by the Kalman backend.
-
-    The public BM-DFM matrix API stores R as a full measurement covariance
-    matrix. The current BM specification uses diagonal measurement noise, and
-    the Kalman implementation has a faster path when R is supplied as a
-    one-dimensional vector of diagonal variances. Preserve a full matrix only
-    if a future specification introduces non-zero off-diagonal covariances.
-    """
+def _kalman_R(R: np.ndarray) -> np.ndarray:
     R_arr = np.asarray(R, dtype=float)
     if R_arr.ndim == 1:
         return R_arr.copy()
     if R_arr.ndim != 2 or R_arr.shape[0] != R_arr.shape[1]:
-        raise ValueError(f"R must be a vector or a square matrix, got shape {R_arr.shape}.")
-
+        raise ValueError(f"R must be a vector or square matrix, got {R_arr.shape}.")
     diag = np.diag(R_arr).copy()
-    off_diag = R_arr - np.diag(diag)
-    if np.allclose(off_diag, 0.0):
-        return diag
-    return R_arr.copy()
+    return diag if np.allclose(R_arr, np.diag(diag)) else R_arr.copy()
 
 
 def _smooth_with_final_parameters(
@@ -79,18 +53,11 @@ def _smooth_with_final_parameters(
     a0: np.ndarray,
     P0: np.ndarray,
 ):
-    """Run the post-EM Kalman smoother using the final parameter matrices.
-
-    EM iterations return smoothed states produced by the E-step under the
-    previous parameter values. After the final M-step, the matrices in `params`
-    have changed. This final smoother makes the returned states consistent with
-    the returned final A/Q/C/R/a0/P0. No additional M-step is performed.
-    """
     ss = StateSpaceParams(
         T=np.asarray(A, dtype=float),
         Q=np.asarray(Q, dtype=float),
         C=np.asarray(C, dtype=float),
-        R=_kalman_R_from_measurement_covariance(R),
+        R=_kalman_R(R),
         a0=np.asarray(a0, dtype=float),
         P0=np.asarray(P0, dtype=float),
     )
@@ -120,7 +87,6 @@ def fit_bm_dfm_fast(
 
     Y_monthly = np.asarray(Y_monthly, dtype=float)
     y_quarterly = np.asarray(y_quarterly, dtype=float).reshape(-1)
-
     if Y_monthly.ndim != 2:
         raise ValueError("Y_monthly must be 2D (T, nM).")
     if y_quarterly.ndim != 1:
@@ -128,20 +94,13 @@ def fit_bm_dfm_fast(
     if Y_monthly.shape[0] != y_quarterly.shape[0]:
         raise ValueError("Y_monthly and y_quarterly must share the same T index.")
 
-    Tn, nM = Y_monthly.shape
+    _Tn, nM = Y_monthly.shape
     nQ = int(config.n_quarterly)
-    if nQ != 1:
-        raise ValueError("This BM-DFM variant expects a single quarterly target (n_quarterly=1).")
-
     Y_raw = np.concatenate([Y_monthly, y_quarterly[:, None]], axis=1)
-
-    scale_mode = str(config.scaling_mode)
-    if scale_mode == "toolbox_vintage":
-        scale_mode = "internal_per_run"
+    scale_mode = "internal_per_run" if config.scaling_mode == "toolbox_vintage" else config.scaling_mode
     Y, scaler = scale_panel(Y_raw, mode=scale_mode)
 
     blocks_arr = _as_blocks_array(config.blocks, nM)
-
     if em_cache is None:
         em_cache = build_em_cache(
             nM=nM,
@@ -151,102 +110,81 @@ def fit_bm_dfm_fast(
             enforce_q_loading_constraint=bool(config.enforce_quarterly_loading_constraint),
         )
 
-    params = init_params
-    if params is None:
-        params = _initialize_params(Y, nM=nM, config=config)
+    params0 = init_params if init_params is not None else _initialize_params(Y, nM=nM, config=config)
 
-    P0_mode = str(getattr(config, "P0_mode", "diffuse"))
-    update_initial_state = bool(getattr(config, "update_initial_state_each_iter", False))
-
-    a0_in = None
-    P0_in = None
-
-    loglik_trace: list[float] = []
-    converged = False
-
-    it_iter = tqdm(
-        range(int(config.max_iter)),
-        desc="BM-DFM EM (fast)",
-        unit="iter",
-        dynamic_ncols=True,
-        disable=not bool(verbose),
-    )
-
-    for _it in it_iter:
-        (
-            params,
-            loglik,
-            a_smooth,
-            P_smooth,
-            P_lag_smooth,
-            a0_next,
-            P0_next,
-        ) = em_step_ml_fast(
-            Y=Y,
-            params=params,
-            nM=nM,
-            nQ=nQ,
-            r_by_block=tuple(int(x) for x in config.r_by_block),
-            p=int(config.p),
-            ppC=int(getattr(config, "ppC", 5)),
-            mm_style=str(config.mm_weight_style),
-            quarterly_meas_var_floor=float(config.quarterly_meas_var_floor),
-            monthly_meas_var_floor=float(config.monthly_meas_var_floor),
-            idio_ar1=bool(config.idio_ar1),
-            force_var_stability=bool(config.force_var_stability),
-            var_stability_shrink=float(config.var_stability_shrink),
-            P0_mode=P0_mode,
-            a0_in=a0_in,
-            P0_in=P0_in,
-            update_initial_state=update_initial_state,
-            min_var=float(config.min_var),
-            jitter=float(config.jitter),
-            enforce_q_loading_constraint=bool(config.enforce_quarterly_loading_constraint),
-            fix_quarterly_R=bool(config.fix_quarterly_R),
-            blocks=blocks_arr,
-            cache=em_cache,
-        )
-
-        loglik_trace.append(float(loglik))
-        if verbose:
-            it_iter.set_postfix(ll=float(loglik), refresh=False)
-        if update_initial_state:
-            a0_in = a0_next
-            P0_in = P0_next
-        if _converged(loglik_trace, tol=float(config.tol), mode=str(config.convergence_mode)):
-            converged = True
-            break
-
-    # Canonical matrix API: A is the transition matrix and C is the measurement matrix.
-    A, Q, C, R, a0, P0, state_index = build_state_space(
-        params=params,
+    em_kwargs = dict(
         nM=nM,
         nQ=nQ,
         r_by_block=tuple(int(x) for x in config.r_by_block),
         p=int(config.p),
-        ppC=int(getattr(config, "ppC", 5)),
+        ppC=int(config.ppC),
+        mm_style=str(config.mm_weight_style),
+        quarterly_meas_var_floor=float(config.quarterly_meas_var_floor),
+        monthly_meas_var_floor=float(config.monthly_meas_var_floor),
+        idio_ar1=bool(config.idio_ar1),
+        force_var_stability=bool(config.force_var_stability),
+        var_stability_shrink=float(config.var_stability_shrink),
+        P0_mode=str(config.P0_mode),
+        min_var=float(config.min_var),
+        jitter=float(config.jitter),
+        enforce_q_loading_constraint=bool(config.enforce_quarterly_loading_constraint),
+        fix_quarterly_R=bool(config.fix_quarterly_R),
+        blocks=blocks_arr,
+        cache=em_cache,
+    )
+    build_kwargs = dict(
+        nM=nM,
+        nQ=nQ,
+        r_by_block=tuple(int(x) for x in config.r_by_block),
+        p=int(config.p),
+        ppC=int(config.ppC),
         mm_style=str(config.mm_weight_style),
         quarterly_meas_var_floor=float(config.quarterly_meas_var_floor),
         idio_ar1=bool(config.idio_ar1),
         jitter=float(config.jitter),
-        P0_mode=P0_mode,
-        a0_override=a0_in,
-        P0_override=P0_in,
+        P0_mode=str(config.P0_mode),
     )
 
-    final_smooth = _smooth_with_final_parameters(
-        Y,
-        A=A,
-        Q=Q,
-        C=C,
-        R=R,
-        a0=a0,
-        P0=P0,
+    em_out = run_em_loop(
+        Y=Y,
+        initial_params=params0,
+        config=config,
+        em_step=em_step_ml_fast,
+        em_kwargs=em_kwargs,
+        build_kwargs=build_kwargs,
+        description="BM-DFM projected GEM (fast)",
+        verbose=verbose,
     )
+    params = em_out.params
+
+    identification_info = None
+    if str(config.identification_mode) == "sign_anchor":
+        params, identification_info = identify_signs(
+            params,
+            r_by_block=tuple(int(x) for x in config.r_by_block),
+            anchor_indices=config.identification_anchor_indices,
+        )
+
+    A, Q, C, R, a0, P0, state_index = build_state_space(
+        params=params,
+        a0_override=em_out.a0_override,
+        P0_override=em_out.P0_override,
+        **build_kwargs,
+    )
+    final_smooth = _smooth_with_final_parameters(
+        Y, A=A, Q=Q, C=C, R=R, a0=a0, P0=P0
+    )
+
+    diagnostics = dict(em_out.diagnostics)
+    diagnostics["final_recomputed_loglik"] = float(getattr(final_smooth, "loglik", diagnostics["final_loglik"]))
+    diagnostics["identification_mode"] = str(config.identification_mode)
+    if identification_info is not None:
+        diagnostics["identification_signs"] = identification_info.signs.tolist()
+        diagnostics["identification_anchor_indices"] = identification_info.anchor_indices.tolist()
 
     return BMDfmResult(
         params=params,
-        loglik_trace=loglik_trace,
+        loglik_trace=em_out.loglik_trace,
         a_smooth=final_smooth.a_smooth,
         P_smooth=final_smooth.P_smooth,
         P_lag_smooth=final_smooth.P_lag_smooth,
@@ -259,6 +197,7 @@ def fit_bm_dfm_fast(
         state_index=state_index,
         scaler=scaler,
         config=config,
-        converged=converged,
+        converged=em_out.converged,
         em_cache=em_cache,
+        diagnostics=diagnostics,
     )

@@ -18,7 +18,7 @@ def test_baing_selects_reasonable_r(tmp_path: Path) -> None:
     L = rng.normal(size=(N, true_r))
     Z = F @ L.T + 0.3 * rng.normal(size=(T, N))
 
-    dates = pd.date_range("1990-01-01", periods=T, freq="M")
+    dates = pd.date_range("1990-01-01", periods=T, freq="ME")
     cols = [f"x{j+1}" for j in range(N)]
     X = pd.DataFrame(Z, index=dates, columns=cols)
 
