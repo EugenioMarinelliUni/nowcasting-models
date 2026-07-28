@@ -97,6 +97,7 @@ def test_fixed_params_pseudort_path_uses_matrix_api_and_returns_predictions():
 
     assert not pred_df.empty
     assert pred_df["fixed_params"].all()
+    assert (pred_df["parameter_mode"] == "fixed").all()
     assert set(pred_df["moq"]) == {1, 2, 3}
     assert np.isfinite(pred_df["pred"].to_numpy(dtype=float)).all()
     assert np.isfinite(pred_df["actual"].to_numpy(dtype=float)).all()

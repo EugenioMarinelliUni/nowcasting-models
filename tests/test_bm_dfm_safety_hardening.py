@@ -124,6 +124,7 @@ def test_cli_has_no_implicit_release_policy_and_enforces_safe_gdp_defaults():
     leak_action = next(a for a in parser._actions if a.dest == "no_qe_leak")
 
     assert delay_action.required is True
+    assert set(delay_action.choices) == {"none", "json_map"}
     assert gdp_action.default == 1
     assert leak_action.default is True
 

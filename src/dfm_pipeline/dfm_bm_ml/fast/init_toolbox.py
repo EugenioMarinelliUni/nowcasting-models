@@ -32,22 +32,32 @@ def _fill_series(values: np.ndarray, method: str) -> np.ndarray:
 
 
 def prepare_init_panel(Y: np.ndarray, nM: int, method: str) -> np.ndarray:
-    """
-    Prepare a dense panel for PCA-style initialization while leaving the main EM/Kalman
-    pipeline unchanged. This is intentionally conservative: we only change the data used
-    to initialize the factors/parameters.
+    """Prepare monthly predictors for PCA initialization without densifying GDP.
+
+    Only the first ``nM`` columns are monthly indicators and may be interpolated for
+    factor extraction. Quarterly target columns remain exactly as observed (including
+    their structural non-quarter-end NaNs), so the initial quarterly regression uses
+    genuine quarterly observations only. The EM/Kalman likelihood always receives the
+    original sparse panel.
     """
     Y = np.asarray(Y, dtype=float)
-    out = np.array(Y, copy=True)
+    if Y.ndim != 2:
+        raise ValueError("Y must be a 2D panel.")
+    nM = int(nM)
+    if nM < 0 or nM > Y.shape[1]:
+        raise ValueError(f"nM must lie in [0, {Y.shape[1]}], got {nM}.")
 
-    for j in range(out.shape[1]):
+    out = np.array(Y, copy=True)
+    for j in range(nM):
         out[:, j] = _fill_series(out[:, j], method=method)
 
-    # Recentre any perfectly constant columns after fill to avoid singular PCA artifacts.
-    col_std = np.nanstd(out, axis=0)
-    constant = col_std <= 1e-12
-    if np.any(constant):
-        out[:, constant] = 0.0
+    # Constant monthly predictors cannot contribute to PCA. Never alter the sparse
+    # quarterly target columns here.
+    if nM:
+        col_std = np.nanstd(out[:, :nM], axis=0)
+        constant = col_std <= 1e-12
+        if np.any(constant):
+            out[:, np.where(constant)[0]] = 0.0
     return out
 
 

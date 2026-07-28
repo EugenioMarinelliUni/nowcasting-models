@@ -75,6 +75,7 @@ def test_pseudort_uses_each_vintage_scaler_not_full_sample_target_moments():
     assert np.allclose(pred_a["scaler_mu_y"], pred_b["scaler_mu_y"])
     assert np.allclose(pred_a["scaler_sd_y"], pred_b["scaler_sd_y"])
     assert not pred_a["warm_start_used"].any()
+    assert (pred_a["parameter_mode"] == "recursive").all()
     assert all("init_params" not in kwargs for kwargs in calls_a + calls_b)
 
     expected = pred_a["scaler_mu_y"] + 0.5 * pred_a["scaler_sd_y"]

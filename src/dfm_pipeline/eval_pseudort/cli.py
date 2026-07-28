@@ -103,7 +103,7 @@ def build_parser(description: str) -> argparse.ArgumentParser:
     p.add_argument("--prediction-interval-levels", default="0.68,0.90,0.95")
     p.add_argument(
         "--delay-style",
-        choices=["none", "trailing_nan", "json_map"],
+        choices=["none", "json_map"],
         required=True,
         help="Information-release policy; must be selected explicitly (use json_map for revised-panel pseudo-real-time evaluation)",
     )
@@ -124,7 +124,13 @@ def build_parser(description: str) -> argparse.ArgumentParser:
     p.add_argument("--on-nonconvergence", choices=["raise", "skip", "keep"], default="raise")
 
     p.add_argument("--warm-start", action="store_true")
-    p.add_argument("--fixed-params", action="store_true")
+    p.add_argument(
+        "--parameter-mode",
+        choices=["recursive", "fixed"],
+        default="recursive",
+        help="DFM-recursive re-estimates parameters at each vintage; DFM-fixed estimates once at --train-end and only updates states.",
+    )
+    p.add_argument("--fixed-params", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--train-end", default=None)
     p.add_argument("--train-max-iter", type=int, default=None)
     p.add_argument("--blas-threads", type=int, default=1)
@@ -217,6 +223,7 @@ def main_with_fit(fit_fn: Callable, *, description: str) -> None:
         on_nonconvergence=args.on_nonconvergence,
         apply_masks_to_vintage_provider=bool(args.apply_release_masks_to_vintages),
         vintage_as_of_rule=str(args.vintage_as_of_rule),
+        parameter_mode=("fixed" if bool(args.fixed_params) else str(args.parameter_mode)),
     )
 
     target_scaler = TargetOutputScaler.from_json(args.target_scale_json) if args.target_scale_json else None
@@ -241,7 +248,6 @@ def main_with_fit(fit_fn: Callable, *, description: str) -> None:
         model_config=model_config,
         eval_cfg=eval_config,
         warm_start=bool(args.warm_start),
-        fixed_params=bool(args.fixed_params),
         train_end=args.train_end,
         train_max_iter=args.train_max_iter,
         blas_threads=int(args.blas_threads),

@@ -90,49 +90,103 @@ def _call_supported(fn: Callable[..., Any], /, **kwargs: Any) -> Any:
 # Masks for pseudo-real-time vintages
 # -----------------------------------------------------------------------------
 
+def _validate_delay_map(
+    delay_map: object,
+    predictor_columns: Any,
+) -> dict[str, int]:
+    """Validate a complete predictor-specific monthly release-lag map.
+
+    Every predictor must appear exactly once. Lags are non-negative integers in
+    months. Full coverage prevents omitted predictors from silently receiving an
+    unsafe contemporaneous-release assumption.
+    """
+    if not isinstance(delay_map, dict):
+        raise TypeError("delay_map must be a JSON object mapping predictor names to lags.")
+
+    expected = [str(c) for c in predictor_columns]
+    expected_set = set(expected)
+    supplied_set = {str(k) for k in delay_map}
+    missing = sorted(expected_set - supplied_set)
+    unknown = sorted(supplied_set - expected_set)
+    if missing or unknown:
+        details = []
+        if missing:
+            details.append(f"missing predictors={missing}")
+        if unknown:
+            details.append(f"unknown predictors={unknown}")
+        raise ValueError(
+            "delay_map must cover the predictor panel exactly; " + "; ".join(details)
+        )
+
+    validated: dict[str, int] = {}
+    for col in expected:
+        lag = delay_map[col]
+        if isinstance(lag, bool) or not isinstance(lag, int):
+            raise TypeError(
+                f"Release lag for {col!r} must be a non-negative integer, got {lag!r}."
+            )
+        if lag < 0:
+            raise ValueError(
+                f"Release lag for {col!r} must be non-negative, got {lag}."
+            )
+        validated[col] = int(lag)
+    return validated
+
+
 def _apply_delay_mask(
     X: pd.DataFrame,
     eval_date: pd.Timestamp,
     delay_style: str,
     delay_map: Optional[dict],
 ) -> pd.DataFrame:
-    if delay_style in ("none", "trailing_nan"):
-        return X
-
+    if delay_style == "none":
+        return X.copy()
+    if delay_style == "trailing_nan":
+        raise ValueError(
+            "delay_style='trailing_nan' has been removed because a common trailing "
+            "lag is not a defensible substitute for predictor-specific publication lags. "
+            "Use delay_style='json_map'."
+        )
     if delay_style != "json_map":
         raise ValueError(f"Unknown delay_style: {delay_style!r}")
-
     if delay_map is None:
         raise ValueError("delay_style=json_map requires delay_map")
 
-    X = X.copy()
+    validated = _validate_delay_map(delay_map, X.columns)
+    out = X.copy()
     eval_ms = pd.Timestamp(eval_date).to_period("M").to_timestamp(how="start")
-
-    for col, d in delay_map.items():
-        if col not in X.columns:
-            continue
-        d = int(d)
-        cutoff = eval_ms - pd.offsets.MonthBegin(d)
-        X.loc[X.index > cutoff, col] = np.nan
-
-    return X
+    for col in out.columns:
+        cutoff = eval_ms - pd.offsets.MonthBegin(validated[str(col)])
+        # This operation only adds NaNs; naturally missing observations remain NaN.
+        out.loc[out.index > cutoff, col] = np.nan
+    return out
 
 
 def _mask_quarterly_target_release(
     y: pd.Series,
     eval_date: pd.Timestamp,
     gdp_rel: int,
+    *,
+    as_of_rule: str = "month_start",
 ) -> pd.Series:
+    """Mask GDP values that were not released by the vintage cutoff.
+
+    With a month-start cutoff, a release occurring during the evaluation month is
+    still unavailable. With a month-end cutoff, it is available during that month.
+    Actual historical-vintage providers normally bypass this approximation because
+    their target snapshot already records release availability.
+    """
     y = y.copy()
     if gdp_rel <= 0:
         return y
+    if as_of_rule not in {"month_start", "month_end"}:
+        raise ValueError("as_of_rule must be month_start or month_end.")
 
     y_idx = pd.DatetimeIndex(y.index)
     q_end = y_idx.to_period("Q").end_time.to_period("M").to_timestamp(how="start")
     release_month = q_end + pd.offsets.MonthBegin(int(gdp_rel))
-
     eval_ms = pd.Timestamp(eval_date).to_period("M").to_timestamp(how="start")
-    mask = release_month > eval_ms
+    mask = release_month >= eval_ms if as_of_rule == "month_start" else release_month > eval_ms
     y.loc[mask] = np.nan
     return y
 
@@ -335,6 +389,7 @@ class EvalConfig:
     on_nonconvergence: str = "raise"  # raise|skip|keep
     apply_masks_to_vintage_provider: bool = False
     vintage_as_of_rule: str = "month_start"  # month_start|month_end
+    parameter_mode: str = "recursive"  # recursive|fixed
 
     def validate(self) -> None:
         if int(self.gdp_rel) < 1:
@@ -344,6 +399,12 @@ class EvalConfig:
             )
         if not bool(self.no_qe_leak):
             raise ValueError("Quarter-end target leakage protection cannot be disabled.")
+        if self.delay_style not in {"none", "json_map"}:
+            raise ValueError("delay_style must be 'none' or 'json_map'; trailing_nan was removed.")
+        if self.delay_style == "json_map" and not self.delay_json:
+            raise ValueError("delay_style=json_map requires delay_json.")
+        if self.parameter_mode not in {"recursive", "fixed"}:
+            raise ValueError("parameter_mode must be recursive or fixed.")
         if self.on_nonconvergence not in {"raise", "skip", "keep"}:
             raise ValueError("on_nonconvergence must be raise, skip, or keep.")
         if self.vintage_as_of_rule not in {"month_start", "month_end"}:
@@ -368,7 +429,7 @@ def run_pseudo_rt_eval_fast(
     model_config: Any,
     eval_cfg: EvalConfig,
     warm_start: bool = True,
-    fixed_params: bool = False,
+    fixed_params: Optional[bool] = None,
     train_end: Optional[str] = None,
     train_max_iter: Optional[int] = None,
     blas_threads: int | None = None,
@@ -386,6 +447,17 @@ def run_pseudo_rt_eval_fast(
     from tqdm.auto import tqdm
 
     eval_cfg.validate()
+    parameter_mode = str(eval_cfg.parameter_mode)
+    if fixed_params is not None:
+        # Backward-compatible Python API: the legacy boolean overrides the default
+        # EvalConfig mode. New callers should set EvalConfig.parameter_mode.
+        parameter_mode = "fixed" if bool(fixed_params) else "recursive"
+    is_fixed = parameter_mode == "fixed"
+    if is_fixed and str(getattr(model_config, "P0_mode", "steady_state")) == "estimated":
+        raise ValueError(
+            "DFM-fixed does not support P0_mode='estimated' because fixed evaluation "
+            "must reuse a well-defined initial-state policy; use P0_mode='steady_state'."
+        )
     if blas_threads is not None and int(blas_threads) > 0:
         limit_blas_threads(int(blas_threads))
 
@@ -410,7 +482,7 @@ def run_pseudo_rt_eval_fast(
         if eval_cfg.delay_json is None:
             raise ValueError("delay_style=json_map requires delay_json")
         with open(eval_cfg.delay_json, "r", encoding="utf-8") as f:
-            delay_map = json.load(f)
+            delay_map = _validate_delay_map(json.load(f), X_full.columns)
 
     horizons = tuple(eval_cfg.horizons)
     scaling_mode = str(getattr(model_config, "scaling_mode", "external_frozen"))
@@ -449,7 +521,12 @@ def run_pseudo_rt_eval_fast(
                 delay_style=str(eval_cfg.delay_style),
                 delay_map=delay_map,
             )
-            y_v = _mask_quarterly_target_release(y_v, eval_date=t, gdp_rel=int(eval_cfg.gdp_rel))
+            y_v = _mask_quarterly_target_release(
+                y_v,
+                eval_date=t,
+                gdp_rel=int(eval_cfg.gdp_rel),
+                as_of_rule=str(eval_cfg.vintage_as_of_rule),
+            )
             y_v = _apply_quarter_end_leakage_guard(
                 y_v, t, no_qe_leak=bool(eval_cfg.no_qe_leak)
             )
@@ -457,9 +534,9 @@ def run_pseudo_rt_eval_fast(
 
     params_fixed = None
     scaler_fixed: Optional[PanelScaler] = None
-    if fixed_params:
+    if is_fixed:
         if train_end is None:
-            raise ValueError("fixed_params=True requires train_end")
+            raise ValueError("DFM-fixed requires train_end")
         train_end_ts = pd.Timestamp(train_end).to_period("M").to_timestamp(how="start")
         X_tr, y_tr_m, _train_meta = get_snapshot(train_end_ts)
         if len(X_tr) < min_T:
@@ -495,7 +572,7 @@ def run_pseudo_rt_eval_fast(
             raise TypeError("Training fit must return a PanelScaler for fixed_params evaluation.")
 
     out_rows: list[dict[str, Any]] = []
-    run_state = PRTRunState() if (warm_start_effective and not fixed_params) else None
+    run_state = PRTRunState() if (warm_start_effective and not is_fixed) else None
     vintages = [t for t in idx if eval_start <= t <= eval_end]
 
     pbar = tqdm(vintages, desc="Pseudo/real-time vintages", unit="vintage")
@@ -506,7 +583,19 @@ def run_pseudo_rt_eval_fast(
         if len(X_v) < min_T or np.isfinite(y_v.to_numpy(dtype=float)).sum() < min_q_obs:
             continue
 
-        if fixed_params:
+        active_horizons: list[str] = []
+        for horizon in horizons:
+            target_date = _horizon_target_date(t, horizon)
+            target_observed = bool(
+                target_date in y_v.index and np.isfinite(float(y_v.loc[target_date]))
+            )
+            if horizon == "bac" and target_observed:
+                continue
+            active_horizons.append(horizon)
+        if not active_horizons:
+            continue
+
+        if is_fixed:
             if params_fixed is None or scaler_fixed is None:
                 raise RuntimeError("Fixed parameters/scaler are unavailable.")
             res = _smooth_fixed_params(
@@ -558,8 +647,16 @@ def run_pseudo_rt_eval_fast(
         last_date = pd.Timestamp(X_v.index[-1])
         diag = getattr(res, "diagnostics", None) or {}
 
-        for h in horizons:
+        for h in active_horizons:
             target_date = _horizon_target_date(t, h)
+            target_available_in_information_set = bool(
+                target_date in y_v.index and np.isfinite(float(y_v.loc[target_date]))
+            )
+            # A real-time backcast exists only while the completed quarter's GDP
+            # release is genuinely unavailable in the as-of target history. Once it
+            # is observed, skip the backcast rather than scoring a smoothed in-sample fit.
+            if h == "bac" and target_available_in_information_set:
+                continue
             actual_input = float(y_full.loc[target_date]) if target_date in y_full.index else float("nan")
 
             if target_date < X_v.index[0]:
@@ -621,8 +718,10 @@ def run_pseudo_rt_eval_fast(
                 "scaler_sd_y": float(sd_y),
                 "output_scaler_mean": float(output_scaler.mean),
                 "output_scaler_std": float(output_scaler.std),
-                "warm_start_used": warm_start_effective,
-                "fixed_params": bool(fixed_params),
+                "warm_start_used": bool(warm_start_effective and not is_fixed),
+                "parameter_mode": parameter_mode,
+                "fixed_params": bool(is_fixed),
+                "target_available_in_information_set": target_available_in_information_set,
                 "vintage_mode": str(vintage_meta.get("mode", "unknown")),
                 "em_converged": fit_converged,
                 "em_iterations": int(diag.get("iterations", len(getattr(res, "loglik_trace", [])))),
@@ -825,7 +924,7 @@ def main(argv=None) -> int:
     ap.add_argument(
         "--delay_style",
         required=True,
-        choices=["none", "trailing_nan", "json_map"],
+        choices=["none", "json_map"],
         help="Information-release policy; must be selected explicitly",
     )
     ap.add_argument("--delay_json", default=None)
@@ -848,7 +947,13 @@ def main(argv=None) -> int:
         default="external_frozen",
     )
 
-    ap.add_argument("--fixed_params", action="store_true")
+    ap.add_argument(
+        "--parameter_mode",
+        choices=["recursive", "fixed"],
+        default="recursive",
+        help="DFM-recursive re-estimates each vintage; DFM-fixed estimates once at train_end.",
+    )
+    ap.add_argument("--fixed_params", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--train_end", default=None)
     ap.add_argument("--train_max_iter", type=int, default=None)
 
@@ -886,6 +991,7 @@ def main(argv=None) -> int:
         gdp_rel=int(args.gdp_rel),
         horizons=("now",),
         no_qe_leak=True,
+        parameter_mode=("fixed" if bool(args.fixed_params) else str(args.parameter_mode)),
     )
 
     cfg = BMDfmConfig(
@@ -922,7 +1028,6 @@ def main(argv=None) -> int:
         model_config=cfg,
         eval_cfg=eval_cfg,
         warm_start=bool(args.warm_start),
-        fixed_params=bool(args.fixed_params),
         train_end=args.train_end,
         train_max_iter=args.train_max_iter,
         blas_threads=int(args.blas_threads),
@@ -936,7 +1041,7 @@ def main(argv=None) -> int:
     out_csv = Path(args.out_csv) if args.out_csv else outdir / (
         f"bm_pseudort_fast_miq__{args.panel}__{args.dataset}__{args.tag}__{args.method}"
         f"__r{args.r}__p{args.p}"
-        + ("__fixed" if args.fixed_params else "")
+        + ("__fixed" if (args.fixed_params or args.parameter_mode == "fixed") else "")
         + ("__no_qe_leak" if args.no_qe_leak else "")
         + ".csv"
     )

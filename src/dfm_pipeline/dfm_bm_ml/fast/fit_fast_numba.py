@@ -7,6 +7,7 @@ import numpy as np
 from dfm_pipeline.dfm_dyn.state_space import StateSpaceParams, kalman_filter_smoother
 
 from .em_fast_numba import EMStepCache, build_em_cache, em_step_ml_fast_numba
+from .numba_kernels import NUMBA_AVAILABLE
 from .init import init_params_pca as init_params_pca_legacy
 from .init_toolbox import init_params_pca_toolbox
 from ..blocks import normalize_blocks
@@ -87,6 +88,11 @@ def fit_bm_dfm_fast_numba(
     em_cache: Optional[EMStepCache] = None,
     verbose: bool = False,
 ) -> BMDfmResult:
+    if not bool(NUMBA_AVAILABLE):
+        raise RuntimeError(
+            "Numba is required for fit_bm_dfm_fast_numba. "
+            "Install numba or call fit_bm_dfm_fast instead."
+        )
     if config is None:
         raise ValueError("config is required.")
     config.validate()

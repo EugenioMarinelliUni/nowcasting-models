@@ -33,6 +33,9 @@ class PseudoRTEvalConfig:
     on_nonconvergence: str = "raise"
     apply_masks_to_vintage_provider: bool = False
     vintage_as_of_rule: str = "month_start"
+    parameter_mode: str = "recursive"
+    train_end: str | None = None
+    train_max_iter: int | None = None
 
     def to_fast_config(self) -> EvalConfig:
         return EvalConfig(
@@ -48,6 +51,7 @@ class PseudoRTEvalConfig:
             on_nonconvergence=str(self.on_nonconvergence),
             apply_masks_to_vintage_provider=bool(self.apply_masks_to_vintage_provider),
             vintage_as_of_rule=str(self.vintage_as_of_rule),
+            parameter_mode=str(self.parameter_mode),
         )
 
 
@@ -77,7 +81,8 @@ def run_pseudo_rt_eval(
         model_config=model_config,
         eval_cfg=eval_cfg.to_fast_config(),
         warm_start=bool(warm_start),
-        fixed_params=False,
+        train_end=eval_cfg.train_end,
+        train_max_iter=eval_cfg.train_max_iter,
         blas_threads=blas_threads,
         vintage_provider=vintage_provider,
         target_output_scaler=target_output_scaler,
