@@ -6,22 +6,22 @@ from typing import Tuple
 
 import numpy as np
 
+from ..constraints import (
+    kron_quarterly_constraints as _kron_quarterly_constraints,
+    mm_proportionality_R_mat as _mm_proportionality_R_mat,
+)
+
+
+def mm_proportionality_R_mat(style: str = "toolbox") -> Tuple[np.ndarray, np.ndarray]:
+    return _mm_proportionality_R_mat(style)
+
 
 def toolbox_R_mat() -> Tuple[np.ndarray, np.ndarray]:
-    R = np.array(
-        [
-            [2.0, -1.0, 0.0, 0.0, 0.0],
-            [3.0, 0.0, -1.0, 0.0, 0.0],
-            [2.0, 0.0, 0.0, -1.0, 0.0],
-            [1.0, 0.0, 0.0, 0.0, -1.0],
-        ],
-        dtype=float,
-    )
-    return R, np.zeros(4, dtype=float)
+    return _mm_proportionality_R_mat("toolbox")
 
 
 def kron_quarterly_constraints(R_mat: np.ndarray, r_total: int) -> np.ndarray:
-    return np.kron(R_mat, np.eye(r_total, dtype=float))
+    return _kron_quarterly_constraints(R_mat, r_total)
 
 
 def constrained_ls_fast(

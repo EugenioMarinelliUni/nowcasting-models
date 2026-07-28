@@ -299,17 +299,23 @@ def init_params_pca(
     R_q0 = max(float(R_q0), float(config.quarterly_meas_var_floor))
     R_diag_q0 = np.full(int(nQ), float(R_q0), dtype=float)
 
+    resid_m = Y_m_nan - (F0 @ Lambda_m0.T)
+    resid_var_m = np.nanvar(resid_m, axis=0)
+    resid_var_m = np.where(np.isfinite(resid_var_m), resid_var_m, 1.0)
+    resid_var_m = np.maximum(resid_var_m, float(config.min_var))
+
     if config.idio_ar1:
+        # BMParams.sig2_m is the stationary variance of the AR(1) idiosyncratic
+        # state, not its innovation variance.  Initialise it from the PCA
+        # residual variance after reserving the pinned measurement-noise floor.
         R_m0 = np.full(int(nM), float(config.monthly_meas_var_floor), dtype=float)
+        sig2_m0 = np.maximum(resid_var_m - R_m0, float(config.min_var))
     else:
-        resid_m = Y_m_nan - (F0 @ Lambda_m0.T)
-        R_m0 = np.nanvar(resid_m, axis=0)
-        R_m0 = np.where(np.isfinite(R_m0), R_m0, float(config.monthly_meas_var_floor))
-        R_m0 = np.maximum(R_m0, float(config.monthly_meas_var_floor))
+        R_m0 = np.maximum(resid_var_m, float(config.monthly_meas_var_floor))
+        # Retained for a uniform parameter container; unused when idio_ar1=False.
+        sig2_m0 = np.maximum(resid_var_m, float(config.min_var))
 
     rho_m0 = np.full(int(nM), float(config.rho_idio_init), dtype=float)
-    sig2_m0 = np.full(int(nM), 1.0 - float(config.rho_idio_init) ** 2, dtype=float)
-    sig2_m0 = np.maximum(sig2_m0, float(config.min_var))
 
     rho_q0 = np.zeros(int(nQ), dtype=float)
 

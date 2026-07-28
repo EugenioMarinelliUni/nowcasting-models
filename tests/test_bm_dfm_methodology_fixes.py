@@ -91,8 +91,8 @@ def test_fixed_params_internal_scaling_reuses_training_scaler():
     cfg = BMDfmConfig(
         r_by_block=(1,),
         p=1,
-        max_iter=1,
-        tol=0.0,
+        max_iter=2,
+        tol=1e9,
         scaling_mode="internal_per_run",
         P0_mode="steady_state",
     )
@@ -107,7 +107,7 @@ def test_fixed_params_internal_scaling_reuses_training_scaler():
         warm_start=False,
         fixed_params=True,
         train_end="2020-12-01",
-        train_max_iter=1,
+        train_max_iter=2,
         blas_threads=1,
     )
 

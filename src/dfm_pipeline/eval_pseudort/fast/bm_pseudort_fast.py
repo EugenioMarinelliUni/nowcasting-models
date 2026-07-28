@@ -1,6 +1,8 @@
 # src/dfm_pipeline/eval_pseudort/fast/bm_pseudort_fast.py
 from __future__ import annotations
 
+import copy
+
 from dataclasses import dataclass
 from pathlib import Path
 from statistics import NormalDist
@@ -385,8 +387,8 @@ class EvalConfig:
     horizons: Tuple[str, ...] = ("now",)
     no_qe_leak: bool = True
     prediction_interval_levels: Tuple[float, ...] = (0.68, 0.90, 0.95)
-    require_convergence: bool = False
-    on_nonconvergence: str = "raise"  # raise|skip|keep
+    on_nonconvergence: str = "raise"  # raise|skip|keep; always enforced
+    require_convergence: Optional[bool] = None  # removed compatibility field
     apply_masks_to_vintage_provider: bool = False
     vintage_as_of_rule: str = "month_start"  # month_start|month_end
     parameter_mode: str = "recursive"  # recursive|fixed
@@ -407,6 +409,11 @@ class EvalConfig:
             raise ValueError("parameter_mode must be recursive or fixed.")
         if self.on_nonconvergence not in {"raise", "skip", "keep"}:
             raise ValueError("on_nonconvergence must be raise, skip, or keep.")
+        if self.require_convergence is not None:
+            raise ValueError(
+                "require_convergence was removed from EvalConfig. "
+                "Use on_nonconvergence='raise', 'skip', or 'keep'; that policy is always enforced."
+            )
         if self.vintage_as_of_rule not in {"month_start", "month_end"}:
             raise ValueError("vintage_as_of_rule must be month_start or month_end.")
         for h in self.horizons:
@@ -447,13 +454,21 @@ def run_pseudo_rt_eval_fast(
     from tqdm.auto import tqdm
 
     eval_cfg.validate()
+    # The evaluator owns non-convergence handling.  Disable estimator-level
+    # raising so that the explicit raise/skip/keep policy can be applied once,
+    # consistently, after every recursive fit.  Standalone fit calls may still
+    # use BMDfmConfig.require_convergence directly.
+    model_config_eval = copy.deepcopy(model_config)
+    if hasattr(model_config_eval, "require_convergence"):
+        model_config_eval.require_convergence = False
+
     parameter_mode = str(eval_cfg.parameter_mode)
     if fixed_params is not None:
         # Backward-compatible Python API: the legacy boolean overrides the default
         # EvalConfig mode. New callers should set EvalConfig.parameter_mode.
         parameter_mode = "fixed" if bool(fixed_params) else "recursive"
     is_fixed = parameter_mode == "fixed"
-    if is_fixed and str(getattr(model_config, "P0_mode", "steady_state")) == "estimated":
+    if is_fixed and str(getattr(model_config_eval, "P0_mode", "steady_state")) == "estimated":
         raise ValueError(
             "DFM-fixed does not support P0_mode='estimated' because fixed evaluation "
             "must reuse a well-defined initial-state policy; use P0_mode='steady_state'."
@@ -485,12 +500,12 @@ def run_pseudo_rt_eval_fast(
             delay_map = _validate_delay_map(json.load(f), X_full.columns)
 
     horizons = tuple(eval_cfg.horizons)
-    scaling_mode = str(getattr(model_config, "scaling_mode", "external_frozen"))
+    scaling_mode = str(getattr(model_config_eval, "scaling_mode", "external_frozen"))
     output_scaler = target_output_scaler or TargetOutputScaler()
 
     # Warm starts are only directly reusable under a fixed observation scale.
     warm_start_effective = bool(warm_start and scaling_mode == "external_frozen")
-    min_T = int(max(12, 3 * max(1, int(getattr(model_config, "p", 1))) + 5))
+    min_T = int(max(12, 3 * max(1, int(getattr(model_config_eval, "p", 1))) + 5))
     min_q_obs = 1
 
     def get_snapshot(t: pd.Timestamp) -> tuple[pd.DataFrame, pd.Series, dict[str, Any]]:
@@ -538,13 +553,17 @@ def run_pseudo_rt_eval_fast(
         if train_end is None:
             raise ValueError("DFM-fixed requires train_end")
         train_end_ts = pd.Timestamp(train_end).to_period("M").to_timestamp(how="start")
+        if train_end_ts >= eval_start:
+            raise ValueError(
+                "DFM-fixed requires train_end earlier than eval_start to prevent future-information leakage."
+            )
         X_tr, y_tr_m, _train_meta = get_snapshot(train_end_ts)
         if len(X_tr) < min_T:
             raise ValueError(f"Training window too short. len(X_tr)={len(X_tr)} < {min_T}")
         if np.isfinite(y_tr_m.to_numpy(dtype=float)).sum() < min_q_obs:
             raise ValueError("Training window has no quarterly observations after masking.")
 
-        cfg_tr = model_config
+        cfg_tr = copy.deepcopy(model_config_eval)
         if train_max_iter is not None and hasattr(cfg_tr, "max_iter"):
             try:
                 cfg_tr = cfg_tr.__class__(**cfg_tr.__dict__)
@@ -561,9 +580,10 @@ def run_pseudo_rt_eval_fast(
             warm_start=False,
             verbose_em=True,
         )
-        if bool(eval_cfg.require_convergence) and not bool(getattr(res_tr, "converged", False)):
-            if eval_cfg.on_nonconvergence == "raise":
-                raise RuntimeError("Fixed-parameter training fit did not converge.")
+        if not bool(getattr(res_tr, "converged", False)):
+            raise RuntimeError(
+                "Fixed-parameter training fit did not converge; refusing to freeze non-converged parameters."
+            )
         if not hasattr(res_tr, "params"):
             raise AttributeError("Training fit result has no .params for fixed_params mode.")
         params_fixed = res_tr.params
@@ -603,25 +623,26 @@ def run_pseudo_rt_eval_fast(
                 y_v=y_v,
                 params_fixed=params_fixed,
                 scaler_fixed=scaler_fixed,
-                model_config=model_config,
+                model_config=model_config_eval,
             )
         else:
             res = _fit_one_vintage_em(
                 X_v=X_v,
                 y_v=y_v,
                 fit_fn=fit_fn,
-                model_config=model_config,
+                model_config=model_config_eval,
                 run_state=run_state,
                 warm_start=warm_start_effective,
                 verbose_em=False,
             )
 
         fit_converged = bool(getattr(res, "converged", True))
-        if bool(eval_cfg.require_convergence) and not fit_converged:
+        if not fit_converged:
             if eval_cfg.on_nonconvergence == "raise":
                 raise RuntimeError(f"DFM fit did not converge at vintage {t:%Y-%m}.")
             if eval_cfg.on_nonconvergence == "skip":
                 continue
+            # keep: retain the forecast and mark em_converged=False in output.
 
         n_obs_expected = int(X_v.shape[1] + 1)
         A, C = _extract_transition_and_measurement(res, n_obs_expected=n_obs_expected)
@@ -728,6 +749,7 @@ def run_pseudo_rt_eval_fast(
                 "em_final_loglik": float(diag.get("final_loglik", float("nan"))),
                 "em_min_loglik_increment": float(diag.get("minimum_loglik_increment", float("nan"))),
                 "em_rejected_steps": int(diag.get("rejected_steps", 0)),
+                "on_nonconvergence": str(eval_cfg.on_nonconvergence),
                 "no_qe_leak": bool(eval_cfg.no_qe_leak),
                 "gdp_rel": int(eval_cfg.gdp_rel),
             }

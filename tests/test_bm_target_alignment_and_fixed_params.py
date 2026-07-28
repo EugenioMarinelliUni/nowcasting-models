@@ -69,8 +69,8 @@ def test_fixed_params_pseudort_path_uses_matrix_api_and_returns_predictions():
         r_by_block=(1,),
         p=1,
         n_quarterly=1,
-        max_iter=1,
-        tol=0.0,
+        max_iter=2,
+        tol=1e9,
         scaling_mode="external_frozen",
         P0_mode="steady_state",
         update_initial_state_each_iter=True,
@@ -91,7 +91,7 @@ def test_fixed_params_pseudort_path_uses_matrix_api_and_returns_predictions():
         warm_start=False,
         fixed_params=True,
         train_end="2020-12-01",
-        train_max_iter=1,
+        train_max_iter=2,
         blas_threads=1,
     )
 

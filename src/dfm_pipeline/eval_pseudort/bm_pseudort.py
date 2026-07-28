@@ -29,7 +29,6 @@ class PseudoRTEvalConfig:
     horizons: tuple[str, ...] = ("bac", "now", "for")
     no_qe_leak: bool = True
     prediction_interval_levels: tuple[float, ...] = (0.68, 0.90, 0.95)
-    require_convergence: bool = False
     on_nonconvergence: str = "raise"
     apply_masks_to_vintage_provider: bool = False
     vintage_as_of_rule: str = "month_start"
@@ -47,7 +46,6 @@ class PseudoRTEvalConfig:
             horizons=tuple(self.horizons),
             no_qe_leak=bool(self.no_qe_leak),
             prediction_interval_levels=tuple(self.prediction_interval_levels),
-            require_convergence=bool(self.require_convergence),
             on_nonconvergence=str(self.on_nonconvergence),
             apply_masks_to_vintage_provider=bool(self.apply_masks_to_vintage_provider),
             vintage_as_of_rule=str(self.vintage_as_of_rule),

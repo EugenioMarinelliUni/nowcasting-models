@@ -11,7 +11,7 @@ from .init import init_params_pca as init_params_pca_legacy
 from .init_toolbox import init_params_pca_toolbox
 from ..blocks import normalize_blocks
 from ..fit_core import run_em_loop
-from ..identification import identify_signs
+from ..identification import identify_anchor_triangular, identify_signs
 from ..scaling import scale_panel
 from ..spec import BMDfmConfig
 from ..state_builder import BMParams, build_state_space
@@ -126,6 +126,7 @@ def fit_bm_dfm_fast(
             r_by_block=tuple(int(x) for x in config.r_by_block),
             blocks=blocks_arr,
             enforce_q_loading_constraint=bool(config.enforce_quarterly_loading_constraint),
+            mm_style=str(config.mm_weight_style),
         )
 
     params0 = (
@@ -186,6 +187,12 @@ def fit_bm_dfm_fast(
             r_by_block=tuple(int(x) for x in config.r_by_block),
             anchor_indices=config.identification_anchor_indices,
         )
+    elif str(config.identification_mode) == "anchor_triangular":
+        params, identification_info = identify_anchor_triangular(
+            params,
+            r_by_block=tuple(int(x) for x in config.r_by_block),
+            anchor_indices=config.identification_anchor_indices,
+        )
 
     A, Q, C, R, a0, P0, state_index = build_state_space(
         params=params,
@@ -203,6 +210,9 @@ def fit_bm_dfm_fast(
     if identification_info is not None:
         diagnostics["identification_signs"] = identification_info.signs.tolist()
         diagnostics["identification_anchor_indices"] = identification_info.anchor_indices.tolist()
+        diagnostics["identification_rotations"] = [
+            rotation.tolist() for rotation in identification_info.rotations
+        ]
 
     return BMDfmResult(
         params=params,

@@ -94,7 +94,11 @@ def build_parser(description: str) -> argparse.ArgumentParser:
     p.add_argument("--gem-ll-tolerance", type=float, default=1e-7)
     p.add_argument("--gem-min-step", type=float, default=1e-3)
     p.add_argument("--gem-max-backtracks", type=int, default=12)
-    p.add_argument("--identification-mode", choices=["none", "sign_anchor"], default="none")
+    p.add_argument(
+        "--identification-mode",
+        choices=["none", "sign_anchor", "anchor_triangular"],
+        default="none",
+    )
     p.add_argument("--identification-anchor-indices", default=None, help="Comma-separated monthly row indices, one per factor")
 
     p.add_argument("--eval-start", required=True)
@@ -120,7 +124,7 @@ def build_parser(description: str) -> argparse.ArgumentParser:
         default=True,
         help="Deprecated compatibility flag; quarter-end target leakage protection is always enabled",
     )
-    p.add_argument("--require-convergence", action="store_true")
+    p.add_argument("--require-convergence", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--on-nonconvergence", choices=["raise", "skip", "keep"], default="raise")
 
     p.add_argument("--warm-start", action="store_true")
@@ -149,6 +153,11 @@ def build_parser(description: str) -> argparse.ArgumentParser:
 
 def main_with_fit(fit_fn: Callable, *, description: str) -> None:
     args = build_parser(description).parse_args()
+    if bool(args.require_convergence):
+        raise ValueError(
+            "--require-convergence was removed. Use --on-nonconvergence raise|skip|keep; "
+            "the selected policy is always enforced."
+        )
     if args.blas_threads > 0:
         limit_blas_threads(args.blas_threads)
 
@@ -219,7 +228,6 @@ def main_with_fit(fit_fn: Callable, *, description: str) -> None:
         horizons=_csv_tuple(args.horizons, str),
         no_qe_leak=True,
         prediction_interval_levels=_csv_tuple(args.prediction_interval_levels, float),
-        require_convergence=bool(args.require_convergence),
         on_nonconvergence=args.on_nonconvergence,
         apply_masks_to_vintage_provider=bool(args.apply_release_masks_to_vintages),
         vintage_as_of_rule=str(args.vintage_as_of_rule),

@@ -11,7 +11,7 @@ from .constraints import (
     constrained_ls,
     kron_quarterly_constraints,
     mm_weights,
-    toolbox_R_mat,
+    mm_proportionality_R_mat,
 )
 from .state_builder import BMParams, build_state_space
 from .steady_state import project_psd, safe_sym
@@ -67,15 +67,12 @@ def em_step_ml(
     Behavior:
     - If idio_ar1=True: monthly idios are states; monthly measurement variances are pinned
       to monthly_meas_var_floor (toolbox convention).
-    - If enforce_q_loading_constraint=True: requires mm_style == "toolbox".
+    - If enforce_q_loading_constraint=True: imposes loadings proportional to the selected MM weights.
     - Optional VAR stability enforcement for each factor block via shrinkage.
     - Optional initial-state updates: (a0_next,P0_next) set to smoother t=0 moments.
     """
     r_by_block = tuple(int(x) for x in r_by_block)
     r_total = int(sum(r_by_block))
-
-    if bool(enforce_q_loading_constraint) and mm_style != "toolbox":
-        raise ValueError('enforce_q_loading_constraint requires mm_style="toolbox".')
 
     # Build state-space with chosen initial moments
     Tm, Qm, C, R, a0_used, P0_used, idx = build_state_space(
@@ -268,7 +265,7 @@ def em_step_ml(
     if int(nQ) > 0:
         if int(ppC) != 5:
             raise ValueError("Quarterly loading updates assume ppC=5.")
-        R_mat, _ = toolbox_R_mat()
+        R_mat, _ = mm_proportionality_R_mat(mm_style)
         R_con = kron_quarterly_constraints(R_mat, r_total)  # (4*r, 5*r)
         q_con = np.zeros((R_con.shape[0],), dtype=float)
 

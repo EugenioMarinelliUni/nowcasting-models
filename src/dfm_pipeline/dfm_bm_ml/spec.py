@@ -64,8 +64,9 @@ class BMDfmConfig:
     gem_min_step: float = 1e-3
     gem_max_backtracks: int = 12
 
-    # Optional post-estimation factor identification.  ``sign_anchor`` removes
-    # arbitrary sign flips while preserving the likelihood and common component.
+    # Optional post-estimation factor identification. ``sign_anchor`` is for
+    # one-factor blocks; ``anchor_triangular`` also removes within-block
+    # orthogonal rotation ambiguity when a block contains multiple factors.
     identification_mode: str = "none"
     identification_anchor_indices: Optional[Sequence[int]] = None
 
@@ -153,8 +154,17 @@ class BMDfmConfig:
         if int(self.gem_max_backtracks) < 0:
             raise ValueError("gem_max_backtracks must be non-negative.")
 
-        if self.identification_mode not in {"none", "sign_anchor"}:
-            raise ValueError("identification_mode must be 'none' or 'sign_anchor'.")
+        if self.identification_mode not in {"none", "sign_anchor", "anchor_triangular"}:
+            raise ValueError(
+                "identification_mode must be 'none', 'sign_anchor', or 'anchor_triangular'."
+            )
+        if self.identification_mode == "sign_anchor" and any(
+            int(r) > 1 for r in self.r_by_block
+        ):
+            raise ValueError(
+                "sign_anchor does not remove rotational ambiguity in multi-factor blocks; "
+                "use identification_mode='anchor_triangular'."
+            )
         if self.identification_mode != "none" and self.P0_mode == "estimated":
             raise ValueError(
                 "Automatic factor identification is not supported with freely estimated initial moments; "

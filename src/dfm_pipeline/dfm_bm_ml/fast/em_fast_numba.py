@@ -14,7 +14,7 @@ import numpy as np
 
 from dfm_pipeline.dfm_dyn.state_space import StateSpaceParams, kalman_filter_smoother
 
-from ..constraints import toolbox_R_mat, kron_quarterly_constraints, mm_weights
+from ..constraints import mm_proportionality_R_mat, kron_quarterly_constraints, mm_weights
 from .constraints_fast import constrained_ls_fast
 from ..state_builder import BMParams, build_state_space
 from ..steady_state import project_psd, safe_sym
@@ -193,6 +193,7 @@ def build_em_cache(
     r_by_block: Sequence[int],
     blocks: Optional[np.ndarray],
     enforce_q_loading_constraint: bool,
+    mm_style: str = "toolbox",
 ) -> EMStepCache:
     r_by_block = tuple(int(x) for x in r_by_block)
     r_total = int(sum(r_by_block))
@@ -218,7 +219,7 @@ def build_em_cache(
         monthly_sel = tuple(monthly_sel_list)
 
     if bool(enforce_q_loading_constraint) and int(nQ) > 0:
-        R_mat, _ = toolbox_R_mat()
+        R_mat, _ = mm_proportionality_R_mat(mm_style)
         R_con = kron_quarterly_constraints(R_mat, r_total)
         q_con = np.zeros((R_con.shape[0],), dtype=float)
     else:
@@ -261,9 +262,6 @@ def em_step_ml_fast_numba(
     r_by_block = tuple(int(x) for x in r_by_block)
     r_total = int(sum(r_by_block))
 
-    if bool(enforce_q_loading_constraint) and mm_style != "toolbox":
-        raise ValueError('enforce_q_loading_constraint requires mm_style="toolbox".')
-
     if cache is None:
         cache = build_em_cache(
             nM=int(nM),
@@ -271,6 +269,7 @@ def em_step_ml_fast_numba(
             r_by_block=r_by_block,
             blocks=blocks,
             enforce_q_loading_constraint=bool(enforce_q_loading_constraint),
+            mm_style=str(mm_style),
         )
 
     Tm, Qm, C, R, a0_used, P0_used, idx = build_state_space(
