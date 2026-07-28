@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Any
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
@@ -51,19 +51,25 @@ def prepare_init_panel(Y: np.ndarray, nM: int, method: str) -> np.ndarray:
     return out
 
 
-def init_params_pca_toolbox(Y: np.ndarray, nM: int, config: Any):
+def init_params_pca_toolbox(
+    Y: np.ndarray,
+    nM: int,
+    config: Any,
+    *,
+    blocks: Optional[np.ndarray] = None,
+):
     method = str(getattr(config, "init_missing_method", "toolbox_spline"))
 
     if method == "legacy_mean":
         cfg = replace(config, pca_fill="mean") if hasattr(config, "__dataclass_fields__") else config
-        return _legacy_init_params_pca(Y, nM=nM, config=cfg)
+        return _legacy_init_params_pca(Y, nM=nM, config=cfg, blocks=blocks)
     if method == "legacy_ffill":
         cfg = replace(config, pca_fill="ffill") if hasattr(config, "__dataclass_fields__") else config
-        return _legacy_init_params_pca(Y, nM=nM, config=cfg)
+        return _legacy_init_params_pca(Y, nM=nM, config=cfg, blocks=blocks)
 
     Y_init = prepare_init_panel(Y, nM=nM, method=method)
     cfg = replace(config, pca_fill="mean") if hasattr(config, "__dataclass_fields__") else config
-    return _legacy_init_params_pca(Y_init, nM=nM, config=cfg)
+    return _legacy_init_params_pca(Y_init, nM=nM, config=cfg, blocks=blocks)
 
 
 __all__ = ["prepare_init_panel", "init_params_pca_toolbox"]

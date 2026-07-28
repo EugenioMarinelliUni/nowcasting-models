@@ -135,6 +135,11 @@ def build_state_space(
         raise ValueError("sum(r_by_block) must be positive")
     if int(ppC) != 5:
         raise ValueError(f"ppC must be 5, got {ppC}")
+    if int(p) <= 0 or int(p) > int(ppC):
+        raise ValueError(
+            f"p must lie in [1, ppC]; got p={p}, ppC={ppC}. "
+            "VAR orders above five are not represented by this state stack."
+        )
 
     # Build factor block slices
     factor_slices: List[slice] = []

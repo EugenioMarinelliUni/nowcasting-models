@@ -9,6 +9,7 @@ from dfm_pipeline.dfm_dyn.state_space import StateSpaceParams, kalman_filter_smo
 from .em_fast_numba import EMStepCache, build_em_cache, em_step_ml_fast_numba
 from .init import init_params_pca as init_params_pca_legacy
 from .init_toolbox import init_params_pca_toolbox
+from ..blocks import normalize_blocks
 from ..fit_core import run_em_loop
 from ..identification import identify_signs
 from ..scaling import scale_panel
@@ -17,20 +18,32 @@ from ..state_builder import BMParams, build_state_space
 from ..types import BMDfmResult
 
 
-def _as_blocks_array(blocks: Optional[list[int]], nM: int) -> Optional[np.ndarray]:
-    if blocks is None:
-        return None
-    arr = np.asarray(blocks, dtype=int)
-    if arr.ndim != 1 or arr.shape[0] != nM:
-        raise ValueError("config.blocks must be a 1D list/array of length n_monthly.")
-    return arr
+def _as_blocks_array(
+    blocks: object,
+    *,
+    nM: int,
+    nQ: int,
+    n_blocks: int,
+) -> Optional[np.ndarray]:
+    """Return the canonical (nM, n_blocks) membership mask.
+
+    Multi-block estimation remains optional: blocks=None is the standard
+    single-block path. Labels and overlapping 2D masks are accepted only when
+    explicitly supplied.
+    """
+    return normalize_blocks(blocks, nM=nM, n_blocks=n_blocks, nQ=nQ)
 
 
-def _initialize_params(Y: np.ndarray, nM: int, config: BMDfmConfig) -> BMParams:
+def _initialize_params(
+    Y: np.ndarray,
+    nM: int,
+    config: BMDfmConfig,
+    blocks: Optional[np.ndarray],
+) -> BMParams:
     method = str(getattr(config, "init_missing_method", "legacy_mean"))
     if method in {"toolbox_spline", "linear_interp", "legacy_mean", "legacy_ffill"}:
-        return init_params_pca_toolbox(Y, nM=nM, config=config)
-    return init_params_pca_legacy(Y, nM=nM, config=config)
+        return init_params_pca_toolbox(Y, nM=nM, config=config, blocks=blocks)
+    return init_params_pca_legacy(Y, nM=nM, config=config, blocks=blocks)
 
 
 def _kalman_R(R: np.ndarray) -> np.ndarray:
@@ -100,7 +113,12 @@ def fit_bm_dfm_fast_numba(
     scale_mode = "internal_per_run" if config.scaling_mode == "toolbox_vintage" else config.scaling_mode
     Y, scaler = scale_panel(Y_raw, mode=scale_mode)
 
-    blocks_arr = _as_blocks_array(config.blocks, nM)
+    blocks_arr = _as_blocks_array(
+        config.blocks,
+        nM=nM,
+        nQ=nQ,
+        n_blocks=len(tuple(config.r_by_block)),
+    )
     if em_cache is None:
         em_cache = build_em_cache(
             nM=nM,
@@ -110,7 +128,11 @@ def fit_bm_dfm_fast_numba(
             enforce_q_loading_constraint=bool(config.enforce_quarterly_loading_constraint),
         )
 
-    params0 = init_params if init_params is not None else _initialize_params(Y, nM=nM, config=config)
+    params0 = (
+        init_params
+        if init_params is not None
+        else _initialize_params(Y, nM=nM, config=config, blocks=blocks_arr)
+    )
 
     em_kwargs = dict(
         nM=nM,

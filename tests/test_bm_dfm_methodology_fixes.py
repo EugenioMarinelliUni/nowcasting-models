@@ -110,7 +110,9 @@ def test_fixed_params_internal_scaling_reuses_training_scaler():
         blas_threads=1,
     )
 
-    y_train = y.loc[:"2020-12-01"].dropna().to_numpy(dtype=float)
+    # With the mandatory one-month GDP release lag, the 2020-Q4 value dated
+    # 2020-12 is not yet available in the 2020-12 training vintage.
+    y_train = y.loc[:"2020-09-01"].dropna().to_numpy(dtype=float)
     assert np.allclose(pred["scaler_mu_y"], np.mean(y_train))
     assert np.allclose(pred["scaler_sd_y"], np.std(y_train, ddof=0))
     assert np.allclose(

@@ -17,6 +17,10 @@ def _companion_from_var(Phi_lags: Sequence[np.ndarray], *, ppC: int) -> np.ndarr
     p = len(Phi_lags)
     if p <= 0:
         raise ValueError("Phi_lags must be non-empty")
+    if p > int(ppC):
+        raise ValueError(
+            f"VAR order p={p} exceeds the available companion stack ppC={ppC}."
+        )
 
     r = int(Phi_lags[0].shape[0])
     for A in Phi_lags:

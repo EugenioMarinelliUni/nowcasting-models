@@ -25,9 +25,9 @@ class PseudoRTEvalConfig:
     eval_end: str
     delay_style: str = "none"
     delay_json: str | None = None
-    gdp_rel: int = 0
+    gdp_rel: int = 1
     horizons: tuple[str, ...] = ("bac", "now", "for")
-    no_qe_leak: bool = False
+    no_qe_leak: bool = True
     prediction_interval_levels: tuple[float, ...] = (0.68, 0.90, 0.95)
     require_convergence: bool = False
     on_nonconvergence: str = "raise"

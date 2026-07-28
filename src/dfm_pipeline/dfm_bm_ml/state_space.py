@@ -1,16 +1,14 @@
 """
-Thin shim for backward-compatibility.
+Thin compatibility shim for the canonical Kalman implementation.
 
-The BM-DFM code historically imported Kalman routines from:
-  dfm_pipeline.dfm_bm_ml.state_space
-
-We now route everything through dfm_pipeline.dfm_dyn.state_space, which
-supports multiple implementations via DFM_STATE_SPACE_IMPL.
+The BM-DFM code historically imported Kalman routines from this module. All
+exports now route to the single validated implementation in
+``dfm_pipeline.dfm_dyn.state_space``.
 """
 
 from __future__ import annotations
 
-import dfm_pipeline.dfm_dyn.state_space as ss  # respects DFM_STATE_SPACE_IMPL
+import dfm_pipeline.dfm_dyn.state_space as ss
 
 KalmanFilterResult = getattr(ss, "KalmanFilterResult", dict)
 KalmanSmootherResult = ss.KalmanSmootherResult

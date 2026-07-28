@@ -7,6 +7,7 @@ from typing import Callable
 
 import pandas as pd
 
+from dfm_pipeline.dfm_bm_ml.blocks import normalize_blocks
 from dfm_pipeline.dfm_bm_ml.scaling import TargetOutputScaler
 from dfm_pipeline.dfm_bm_ml.spec import BMDfmConfig
 from dfm_pipeline.eval_pseudort.fast.bm_pseudort_fast import EvalConfig, run_pseudo_rt_eval_fast
@@ -51,7 +52,7 @@ def build_parser(description: str) -> argparse.ArgumentParser:
     p.add_argument(
         "--blocks-json",
         default=None,
-        help="Optional JSON list assigning each monthly predictor to a zero-based factor block",
+        help="Optional JSON 1D block-label vector or 2D membership mask; omitted for the standard single-block model",
     )
     p.add_argument("--p", type=int, required=True)
     p.add_argument("--mm-style", choices=["toolbox", "scaled"], default="toolbox")
@@ -100,10 +101,25 @@ def build_parser(description: str) -> argparse.ArgumentParser:
     p.add_argument("--eval-end", required=True)
     p.add_argument("--horizons", default="now", help="Comma-separated bac,now,for")
     p.add_argument("--prediction-interval-levels", default="0.68,0.90,0.95")
-    p.add_argument("--delay-style", choices=["none", "trailing_nan", "json_map"], default="none")
+    p.add_argument(
+        "--delay-style",
+        choices=["none", "trailing_nan", "json_map"],
+        required=True,
+        help="Information-release policy; must be selected explicitly (use json_map for revised-panel pseudo-real-time evaluation)",
+    )
     p.add_argument("--delay-json", default=None)
-    p.add_argument("--gdp-rel", type=int, default=0)
-    p.add_argument("--no-qe-leak", action="store_true")
+    p.add_argument(
+        "--gdp-rel",
+        type=int,
+        default=1,
+        help="Quarterly GDP publication lag in months; values below 1 are rejected",
+    )
+    p.add_argument(
+        "--no-qe-leak",
+        action="store_true",
+        default=True,
+        help="Deprecated compatibility flag; quarter-end target leakage protection is always enabled",
+    )
     p.add_argument("--require-convergence", action="store_true")
     p.add_argument("--on-nonconvergence", choices=["raise", "skip", "keep"], default="raise")
 
@@ -143,12 +159,18 @@ def main_with_fit(fit_fn: Callable, *, description: str) -> None:
         raise ValueError("At least one factor-block dimension is required.")
     blocks = None
     if args.blocks_json:
-        blocks = json.loads(Path(args.blocks_json).read_text(encoding="utf-8"))
-        if not isinstance(blocks, list):
-            raise ValueError("--blocks-json must contain a JSON list of zero-based block indices.")
-        blocks = [int(x) for x in blocks]
-        if len(blocks) != X_full.shape[1]:
-            raise ValueError("--blocks-json length must equal the number of monthly predictors.")
+        blocks_raw = json.loads(Path(args.blocks_json).read_text(encoding="utf-8"))
+        if not isinstance(blocks_raw, list):
+            raise ValueError("--blocks-json must contain a JSON label vector or membership matrix.")
+        # Validate now that the monthly dimension is known, then store the canonical
+        # mask so the run configuration is unambiguous and reproducible.
+        blocks_mask = normalize_blocks(
+            blocks_raw,
+            nM=X_full.shape[1],
+            n_blocks=len(r_by_block),
+            nQ=1,
+        )
+        blocks = None if blocks_mask is None else blocks_mask.tolist()
 
     model_config = BMDfmConfig(
         r_by_block=r_by_block,
@@ -189,7 +211,7 @@ def main_with_fit(fit_fn: Callable, *, description: str) -> None:
         delay_json=args.delay_json,
         gdp_rel=int(args.gdp_rel),
         horizons=_csv_tuple(args.horizons, str),
-        no_qe_leak=bool(args.no_qe_leak),
+        no_qe_leak=True,
         prediction_interval_levels=_csv_tuple(args.prediction_interval_levels, float),
         require_convergence=bool(args.require_convergence),
         on_nonconvergence=args.on_nonconvergence,

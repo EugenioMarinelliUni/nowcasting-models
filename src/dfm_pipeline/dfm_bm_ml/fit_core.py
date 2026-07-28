@@ -62,6 +62,7 @@ def run_em_loop(
     rejected_steps = 0
     stalled = False
     converged = False
+    stop_reason = "maximum_iterations"
 
     iterator = tqdm(
         range(int(config.max_iter)),
@@ -134,10 +135,15 @@ def run_em_loop(
                 refresh=False,
             )
 
+        # A rejected GEM proposal leaves the likelihood unchanged by construction.
+        # Check rejection before convergence so that a duplicated likelihood cannot
+        # be misclassified as successful convergence.
+        if stalled:
+            stop_reason = "rejected_candidate"
+            break
         if converged_trace(trace, tol=float(config.tol), mode=str(config.convergence_mode)):
             converged = True
-            break
-        if stalled:
+            stop_reason = "tolerance"
             break
 
     if bool(config.require_convergence) and not converged:
@@ -154,6 +160,7 @@ def run_em_loop(
         "iterations": len(trace),
         "converged": bool(converged),
         "stalled": bool(stalled),
+        "stop_reason": str(stop_reason),
         "rejected_steps": int(rejected_steps),
         "step_sizes": step_sizes,
         "backtracks": backtracks,

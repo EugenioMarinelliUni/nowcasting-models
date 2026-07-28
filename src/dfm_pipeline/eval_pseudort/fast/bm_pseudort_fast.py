@@ -327,9 +327,9 @@ class EvalConfig:
     eval_end: str
     delay_style: str = "none"
     delay_json: Optional[str] = None
-    gdp_rel: int = 0
+    gdp_rel: int = 1
     horizons: Tuple[str, ...] = ("now",)
-    no_qe_leak: bool = False
+    no_qe_leak: bool = True
     prediction_interval_levels: Tuple[float, ...] = (0.68, 0.90, 0.95)
     require_convergence: bool = False
     on_nonconvergence: str = "raise"  # raise|skip|keep
@@ -337,6 +337,13 @@ class EvalConfig:
     vintage_as_of_rule: str = "month_start"  # month_start|month_end
 
     def validate(self) -> None:
+        if int(self.gdp_rel) < 1:
+            raise ValueError(
+                "gdp_rel must be at least 1 in revised-panel pseudo-real-time mode; "
+                "same-month quarterly GDP availability is leakage-prone."
+            )
+        if not bool(self.no_qe_leak):
+            raise ValueError("Quarter-end target leakage protection cannot be disabled.")
         if self.on_nonconvergence not in {"raise", "skip", "keep"}:
             raise ValueError("on_nonconvergence must be raise, skip, or keep.")
         if self.vintage_as_of_rule not in {"month_start", "month_end"}:
@@ -815,10 +822,15 @@ def main(argv=None) -> int:
     ap.add_argument("--eval_start", default=None)
     ap.add_argument("--eval_end", default=None)
 
-    ap.add_argument("--delay_style", default="none", choices=["none", "trailing_nan", "json_map"])
+    ap.add_argument(
+        "--delay_style",
+        required=True,
+        choices=["none", "trailing_nan", "json_map"],
+        help="Information-release policy; must be selected explicitly",
+    )
     ap.add_argument("--delay_json", default=None)
 
-    ap.add_argument("--gdp_rel", type=int, default=0)
+    ap.add_argument("--gdp_rel", type=int, default=1)
     ap.add_argument("--warm_start", action="store_true")
     ap.add_argument("--blas_threads", type=int, default=1)
 
@@ -840,7 +852,12 @@ def main(argv=None) -> int:
     ap.add_argument("--train_end", default=None)
     ap.add_argument("--train_max_iter", type=int, default=None)
 
-    ap.add_argument("--no_qe_leak", action="store_true", help="Do not use quarter-end target observation at moq=3")
+    ap.add_argument(
+        "--no_qe_leak",
+        action="store_true",
+        default=True,
+        help="Deprecated compatibility flag; quarter-end leakage protection is always enabled",
+    )
 
     args = ap.parse_args(argv)
 
@@ -868,7 +885,7 @@ def main(argv=None) -> int:
         delay_json=args.delay_json,
         gdp_rel=int(args.gdp_rel),
         horizons=("now",),
-        no_qe_leak=bool(args.no_qe_leak),
+        no_qe_leak=True,
     )
 
     cfg = BMDfmConfig(

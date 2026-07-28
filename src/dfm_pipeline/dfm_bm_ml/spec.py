@@ -20,7 +20,10 @@ class BMDfmConfig:
     r_by_block: Sequence[int]
     p: int
 
-    blocks: Optional[list[int]] = None
+    # Optional block membership. None selects the standard single-block model.
+    # When multiple factor blocks are requested, provide either a 1D zero-based
+    # label vector or a 2D membership mask; shape validation occurs once nM is known.
+    blocks: Optional[object] = None
     n_quarterly: int = 1
     ppC: int = 5
 
@@ -73,6 +76,11 @@ class BMDfmConfig:
             raise ValueError("All entries of r_by_block must be positive integers.")
         if int(self.p) <= 0:
             raise ValueError("p must be a positive integer.")
+        if int(self.p) > int(self.ppC):
+            raise ValueError(
+                f"p={self.p} exceeds ppC={self.ppC}. This implementation uses a "
+                "five-month Mariano-Murasawa factor stack, so supported VAR orders are 1 through 5."
+            )
         if int(self.n_quarterly) != 1:
             raise ValueError("This BM-DFM implementation expects n_quarterly == 1.")
         if int(self.ppC) != 5:
@@ -161,8 +169,19 @@ class BMDfmConfig:
             if any(x < 0 for x in anchors):
                 raise ValueError("identification_anchor_indices must be non-negative.")
 
-        if self.blocks is not None and len(self.blocks) == 0:
-            raise ValueError("blocks must be None or a non-empty list[int].")
+        if len(tuple(self.r_by_block)) > 1 and self.blocks is None:
+            raise ValueError(
+                "Multiple entries in r_by_block require an explicit blocks membership specification. "
+                "Use blocks=None only for the optional standard single-block model."
+            )
+        if self.blocks is not None:
+            try:
+                if len(self.blocks) == 0:  # type: ignore[arg-type]
+                    raise ValueError("blocks must be None or a non-empty label vector/membership mask.")
+            except TypeError as exc:
+                raise ValueError(
+                    "blocks must be None, a 1D label vector, or a 2D membership mask."
+                ) from exc
 
 
 __all__ = ["BMDfmConfig"]
