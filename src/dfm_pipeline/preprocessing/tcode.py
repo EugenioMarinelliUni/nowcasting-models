@@ -31,7 +31,7 @@ def _transform_series(x: pd.Series, code: int) -> pd.Series:
     elif code == 6:
         y = np.log(s.where(s > 0)).diff().diff()
     elif code == 7:
-        y = s.pct_change().diff()               # Δ growth
+        y = s.pct_change(fill_method=None).diff()  # Δ growth; preserve missingness
     else:
         raise ValueError(f"Unknown tcode: {code}. Allowed: {sorted(ALLOWED_TCODES)}")
 

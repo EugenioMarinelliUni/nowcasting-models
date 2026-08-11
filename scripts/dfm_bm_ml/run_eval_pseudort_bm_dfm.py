@@ -1,152 +1,22 @@
 from __future__ import annotations
 
-import argparse
-from pathlib import Path
-from typing import Any
+"""Disabled legacy pseudo-real-time BM-DFM entry point.
 
-import numpy as np
-import pandas as pd
-
-try:
-    from dfm_pipeline.dfm_bm_ml import fit_bm_dfm
-    from dfm_pipeline.dfm_bm_ml.spec import BMDfmConfig
-    from dfm_pipeline.dfm_bm_ml.state_builder import build_state_space
-    from dfm_pipeline.utils.threadpool import limit_blas_threads
-except ImportError:
-    import sys
-
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
-    from dfm_pipeline.dfm_bm_ml import fit_bm_dfm
-    from dfm_pipeline.dfm_bm_ml.spec import BMDfmConfig
-    from dfm_pipeline.dfm_bm_ml.state_builder import build_state_space
-    from dfm_pipeline.utils.threadpool import limit_blas_threads
-
-
-def _rebuild_state_space(res: Any, config: Any, n_monthly: int, n_quarterly: int = 1):
-    return build_state_space(
-        params=res.params,
-        nM=int(n_monthly),
-        nQ=int(n_quarterly),
-        r_by_block=tuple(int(x) for x in getattr(config, "r_by_block")),
-        p=int(getattr(config, "p")),
-        ppC=int(getattr(config, "ppC", 5)),
-        mm_style=str(getattr(config, "mm_weight_style", "toolbox")),
-        quarterly_meas_var_floor=float(getattr(config, "quarterly_meas_var_floor", 1e-6)),
-        idio_ar1=bool(getattr(config, "idio_ar1", True)),
-        jitter=float(getattr(config, "jitter", 1e-8)),
-        P0_mode=str(getattr(config, "P0_mode", "diffuse")),
-        a0_override=None,
-        P0_override=None,
-    )
-
-
-def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser()
-    p.add_argument("--monthly_csv", type=str, required=True)
-    p.add_argument("--quarterly_csv", type=str, required=True)
-    p.add_argument("--out_dir", type=str, required=True)
-
-    p.add_argument("--r_by_block", type=int, nargs="+", required=True)
-    p.add_argument("--p", type=int, required=True)
-
-    p.add_argument("--standardize", action="store_true", default=False)
-    p.add_argument("--no-standardize", dest="standardize", action="store_false")
-
-    p.add_argument("--pca_fill", type=str, default="mean", choices=["mean", "ffill"])
-
-    p.add_argument("--rho_idio_init", type=float, default=0.10)
-    p.add_argument("--max_iter", type=int, default=200)
-    p.add_argument("--tol", type=float, default=1e-6)
-
-    p.add_argument("--force_var_stability", action="store_true", default=True)
-    p.add_argument("--no-force_var_stability", dest="force_var_stability", action="store_false")
-    p.add_argument("--var_stability_shrink", type=float, default=0.98)
-
-    p.add_argument("--monthly_meas_var_floor", type=float, default=1e-4)
-    p.add_argument("--quarterly_meas_var_floor", type=float, default=1e-4)
-
-    p.add_argument("--date_from", type=str, required=True)
-    p.add_argument("--date_to", type=str, required=True)
-    p.add_argument("--blas_threads", type=int, default=1)
-
-    return p.parse_args()
+This script previously truncated the revised panel by evaluation date but did not
+apply the audited release-timing, target-leakage, parameter-mode, and vintage
+safeguards.  It is intentionally disabled so that all pseudo-real-time DFM runs
+go through the hardened evaluators.
+"""
 
 
 def main() -> None:
-    args = _parse_args()
-
-    if int(args.blas_threads) > 0:
-        limit_blas_threads(int(args.blas_threads))
-
-    X = pd.read_csv(args.monthly_csv, index_col=0, parse_dates=True)
-    yq = pd.read_csv(args.quarterly_csv, index_col=0, parse_dates=True).iloc[:, 0]
-    yq = yq.reindex(X.index)
-
-    date_from = pd.Timestamp(args.date_from)
-    date_to = pd.Timestamp(args.date_to)
-    eval_idx = X.loc[date_from:date_to].index
-
-    scaling_mode = "internal_per_run" if bool(args.standardize) else "external_frozen"
-
-    config = BMDfmConfig(
-        r_by_block=tuple(int(x) for x in args.r_by_block),
-        p=int(args.p),
-        idio_ar1=True,
-        rho_idio_init=float(args.rho_idio_init),
-        n_quarterly=1,
-        mm_weight_style="toolbox",
-        quarterly_meas_var_floor=float(args.quarterly_meas_var_floor),
-        monthly_meas_var_floor=float(args.monthly_meas_var_floor),
-        enforce_quarterly_loading_constraint=True,
-        fix_quarterly_R=True,
-        max_iter=int(args.max_iter),
-        tol=float(args.tol),
-        pca_fill=str(args.pca_fill),
-        scaling_mode=scaling_mode,
-        force_var_stability=bool(args.force_var_stability),
-        var_stability_shrink=float(args.var_stability_shrink),
+    raise SystemExit(
+        "This pseudo-real-time DFM entry point is disabled because it bypasses "
+        "the current release-timing, GDP-leakage, convergence, and vintage "
+        "safeguards. Use "
+        "scripts/dfm_bm_ml/run_eval_pseudort_bm_dfm_fast.py or "
+        "scripts/dfm_bm_ml/run_eval_pseudort_bm_dfm_fast_numba.py."
     )
-
-    out_dir = Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    for dt in eval_idx:
-        mask = X.index <= dt
-        Y_monthly = X.loc[mask].to_numpy(dtype=float)
-        y_quarterly = yq.loc[mask].to_numpy(dtype=float)
-
-        res = fit_bm_dfm(X_monthly=Y_monthly, y_quarterly=y_quarterly, config=config)
-        Tm, Qm, C_meas, R_meas, a0, P0, state_index = _rebuild_state_space(
-            res,
-            config=config,
-            n_monthly=Y_monthly.shape[1],
-            n_quarterly=1,
-        )
-
-        scaler = getattr(res, "scaler", None)
-        scaler_mu = np.asarray(getattr(scaler, "mu", np.zeros(Y_monthly.shape[1] + 1, dtype=float)), dtype=float)
-        scaler_sd = np.asarray(getattr(scaler, "sd", np.ones(Y_monthly.shape[1] + 1, dtype=float)), dtype=float)
-        scaler_mode = np.array([getattr(scaler, "mode", scaling_mode)], dtype=object)
-
-        out_path = out_dir / f"bm_dfm_{dt.strftime('%Y-%m-%d')}.npz"
-        np.savez_compressed(
-            out_path,
-            loglik=np.array(res.loglik_trace, dtype=float),
-            a_smooth=res.a_smooth,
-            P_smooth=res.P_smooth,
-            P_lag_smooth=res.P_lag_smooth,
-            T=Tm,
-            Q=Qm,
-            C=C_meas,
-            R=R_meas,
-            a0=a0,
-            P0=P0,
-            scaler_mu=scaler_mu,
-            scaler_sd=scaler_sd,
-            scaler_mode=scaler_mode,
-            f_t_idx=state_index.f_t_idx,
-            f_stack_idx=state_index.f_stack_idx,
-        )
 
 
 if __name__ == "__main__":

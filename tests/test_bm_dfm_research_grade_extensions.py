@@ -15,6 +15,7 @@ from dfm_pipeline.dfm_bm_ml.spec import BMDfmConfig
 from dfm_pipeline.dfm_bm_ml.state_builder import BMParams
 from dfm_pipeline.eval_pseudort.fast.bm_pseudort_fast import EvalConfig, run_pseudo_rt_eval_fast
 from dfm_pipeline.eval_pseudort.vintages import LongFormatVintageProvider
+from dfm_pipeline.preprocessing.tcode import _transform_series
 
 
 def _params_two_factor() -> BMParams:
@@ -189,3 +190,30 @@ def test_gem_feasibility_check_rejects_unstable_var():
         R_diag_q=stable.R_diag_q,
     )
     assert not factor_var_is_stable(unstable, ppC=5)
+
+
+def test_tcode7_preserves_internal_missingness_without_implicit_forward_fill():
+    idx = pd.date_range("2020-01-01", periods=5, freq="MS")
+    x = pd.Series([100.0, np.nan, 121.0, 133.1, 146.41], index=idx)
+
+    transformed = _transform_series(x, 7)
+
+    # A missing level makes both the adjacent growth rate and its first
+    # difference unavailable. No synthetic value may be created by padding.
+    assert transformed.loc[idx[1:4]].isna().all()
+    assert transformed.loc[idx[4]] == pytest.approx(0.0, abs=1e-12)
+
+
+def test_long_format_vintage_provider_rejects_duplicate_monthly_keys():
+    data = pd.DataFrame(
+        {
+            "series": ["x", "x"],
+            # These two dates collapse to the same monthly reference period.
+            "reference_date": ["2020-01-01", "2020-01-31"],
+            "vintage_date": ["2020-02-15", "2020-02-15"],
+            "value": [1.0, 2.0],
+        }
+    )
+
+    with pytest.raises(ValueError, match="duplicate .*vintage_date"):
+        LongFormatVintageProvider(data, target_series="gdp", predictor_order=["x"])

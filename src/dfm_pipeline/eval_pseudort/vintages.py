@@ -57,8 +57,25 @@ class LongFormatVintageProvider:
         df = data[list(required)].copy()
         df[reference_col] = pd.to_datetime(df[reference_col]).dt.to_period("M").dt.to_timestamp()
         df[vintage_col] = pd.to_datetime(df[vintage_col])
+        df = df.dropna(subset=[series_col, reference_col, vintage_col]).copy()
+
+        key_cols = [series_col, reference_col, vintage_col]
+        duplicate_mask = df.duplicated(key_cols, keep=False)
+        if duplicate_mask.any():
+            examples = (
+                df.loc[duplicate_mask, key_cols]
+                .drop_duplicates()
+                .head(5)
+                .to_dict(orient="records")
+            )
+            raise ValueError(
+                "Vintage table contains duplicate "
+                "(series, reference_date, vintage_date) keys after monthly "
+                f"reference-date normalization. Examples: {examples}"
+            )
+
         df[value_col] = pd.to_numeric(df[value_col], errors="coerce")
-        self.data = df.dropna(subset=[series_col, reference_col, vintage_col]).sort_values(vintage_col)
+        self.data = df.sort_values(vintage_col)
 
     @classmethod
     def from_csv(cls, path: str | Path, **kwargs) -> "LongFormatVintageProvider":
