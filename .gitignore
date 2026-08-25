@@ -98,3 +98,5 @@ outputs/
 prof*.out
 prof*.txt
 prof_*.pstats
+*.bak
+*.bak.*
