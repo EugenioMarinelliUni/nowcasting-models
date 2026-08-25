@@ -1,0 +1,2 @@
+scope,n_registry_series,n_candidate_rt_stable,n_candidate_reviewed,n_candidate_unreviewed,n_rows_in_qc_report,n_structural_hard_fail,n_structurally_clean,n_with_leading_missing,n_with_trailing_missing,n_with_internal_missing,n_with_persistent_internal_missing,n_with_all_missing_vintage,min_of_min_observed_fraction,p10_min_observed_fraction,median_min_observed_fraction,min_of_min_n_valid,median_min_n_valid
+all-stable,144,115,6,109,115,0,115,10,89,22,21,0,0.349673202614379,0.99119370770075,0.9987515605493134,214,612.0
