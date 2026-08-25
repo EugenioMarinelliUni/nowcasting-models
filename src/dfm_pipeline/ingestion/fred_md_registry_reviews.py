@@ -215,6 +215,18 @@ def apply_review_overlay(
 
     out = seed_registry.copy()
     out["raw_series"] = out["raw_series"].astype(str)
+
+    # CSV columns that are entirely empty can be inferred by pandas as
+    # float64 (all-NaN). Review overlays subsequently assign strings to
+    # these fields, which currently raises a FutureWarning and will become
+    # an error in a future pandas release. Cast only review text fields to
+    # object; preserve Boolean and mechanical/numeric registry columns.
+    for col in REVIEW_COLUMNS:
+        if col == "raw_series" or col in BOOLEAN_COLUMNS:
+            continue
+        if col in out.columns:
+            out[col] = out[col].astype("object")
+
     out = out.set_index("raw_series", drop=False)
 
     for _, review in reviews.iterrows():
