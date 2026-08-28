@@ -1,43 +1,12 @@
 from __future__ import annotations
 
-import importlib.util
-from pathlib import Path
-
 import pandas as pd
 import pytest
 
-
-# ----------------------------------------------------------------------
-# Load the CLI module directly from scripts/ingestion.
-#
-# This avoids requiring scripts/ to become an importable package merely
-# for unit testing.
-# ----------------------------------------------------------------------
-
-ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = (
-    ROOT
-    / "scripts"
-    / "ingestion"
-    / "check_fred_md_panel_eligibility.py"
+from dfm_pipeline.ingestion.fred_md_panel_eligibility import (
+    build_eligibility_report,
+    build_summary,
 )
-
-spec = importlib.util.spec_from_file_location(
-    "check_fred_md_panel_eligibility",
-    SCRIPT,
-)
-
-if spec is None or spec.loader is None:
-    raise RuntimeError(
-        f"Could not load eligibility-QC module from {SCRIPT}"
-    )
-
-eligibility = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(eligibility)
-
-
-build_eligibility_report = eligibility.build_eligibility_report
-build_summary = eligibility.build_summary
 
 
 def _row(
@@ -114,11 +83,7 @@ def test_ordinary_scope_selects_only_unreviewed_stable_candidates() -> None:
         ]
     )
 
-    report = build_eligibility_report(
-        registry,
-        scope="ordinary",
-    )
-
+    report = build_eligibility_report(registry, scope="ordinary")
     assert report["raw_series"].tolist() == ["ORDINARY"]
 
 
@@ -139,15 +104,32 @@ def test_all_stable_scope_includes_reviewed_and_unreviewed_candidates() -> None:
         ]
     )
 
-    report = build_eligibility_report(
-        registry,
-        scope="all-stable",
+    report = build_eligibility_report(registry, scope="all-stable")
+    assert set(report["raw_series"]) == {"ORDINARY", "REVIEWED"}
+
+
+def test_rt_stable_scope_excludes_reviewed_manual_drop() -> None:
+    registry = pd.DataFrame(
+        [
+            _row("ORDINARY"),
+            _row(
+                "KEEP",
+                review_status="reviewed",
+                include_rt_stable=True,
+            ),
+            _row(
+                "DROP",
+                review_status="reviewed",
+                include_rt_stable=False,
+            ),
+        ]
     )
 
-    assert set(report["raw_series"]) == {
-        "ORDINARY",
-        "REVIEWED",
-    }
+    report = build_eligibility_report(
+        registry,
+        scope="rt-stable-candidates",
+    )
+    assert report["raw_series"].tolist() == ["KEEP", "ORDINARY"]
 
 
 def test_missingness_is_flagged_but_not_hard_failed() -> None:
@@ -165,26 +147,16 @@ def test_missingness_is_flagged_but_not_hard_failed() -> None:
         ]
     )
 
-    report = build_eligibility_report(
-        registry,
-        scope="ordinary",
-    )
-
-    row = report.iloc[0]
+    row = build_eligibility_report(registry, scope="ordinary").iloc[0]
 
     assert bool(row["has_leading_missing"]) is True
     assert bool(row["has_trailing_missing"]) is True
     assert bool(row["has_internal_missing"]) is True
     assert bool(row["has_persistent_internal_missing"]) is True
-
     assert bool(row["qc_hard_fail"]) is False
-    assert (
-        row["qc_status"]
-        == "structurally_clean_with_missingness_flags"
-    )
+    assert row["qc_status"] == "structurally_clean_with_missingness_flags"
 
     flags = set(str(row["qc_flags"]).split("|"))
-
     assert {
         "leading_missing",
         "trailing_missing",
@@ -207,20 +179,11 @@ def test_all_missing_vintage_is_structural_hard_failure() -> None:
         ]
     )
 
-    report = build_eligibility_report(
-        registry,
-        scope="ordinary",
-    )
-
-    row = report.iloc[0]
-
+    row = build_eligibility_report(registry, scope="ordinary").iloc[0]
     assert bool(row["qc_hard_fail"]) is True
     assert row["qc_status"] == "hard_fail"
 
-    reasons = set(
-        str(row["hard_failure_reasons"]).split("|")
-    )
-
+    reasons = set(str(row["hard_failure_reasons"]).split("|"))
     assert "all_missing_vintage" in reasons
     assert "no_valid_observations_in_worst_vintage" in reasons
 
@@ -237,19 +200,10 @@ def test_tcode_change_is_structural_hard_failure() -> None:
         ]
     )
 
-    report = build_eligibility_report(
-        registry,
-        scope="ordinary",
-    )
-
-    row = report.iloc[0]
-
+    row = build_eligibility_report(registry, scope="ordinary").iloc[0]
     assert bool(row["qc_hard_fail"]) is True
 
-    reasons = set(
-        str(row["hard_failure_reasons"]).split("|")
-    )
-
+    reasons = set(str(row["hard_failure_reasons"]).split("|"))
     assert "missing_or_invalid_unique_tcode" in reasons
     assert "multiple_or_missing_tcodes" in reasons
     assert "tcode_changes" in reasons
@@ -267,13 +221,7 @@ def test_invalid_unique_tcode_is_structural_hard_failure() -> None:
         ]
     )
 
-    report = build_eligibility_report(
-        registry,
-        scope="ordinary",
-    )
-
-    row = report.iloc[0]
-
+    row = build_eligibility_report(registry, scope="ordinary").iloc[0]
     assert bool(row["qc_hard_fail"]) is True
     assert "missing_or_invalid_unique_tcode" in str(
         row["hard_failure_reasons"]
@@ -292,19 +240,10 @@ def test_presence_count_mismatch_is_structural_hard_failure() -> None:
         ]
     )
 
-    report = build_eligibility_report(
-        registry,
-        scope="ordinary",
-    )
-
-    row = report.iloc[0]
-
+    row = build_eligibility_report(registry, scope="ordinary").iloc[0]
     assert bool(row["qc_hard_fail"]) is True
 
-    reasons = set(
-        str(row["hard_failure_reasons"]).split("|")
-    )
-
+    reasons = set(str(row["hard_failure_reasons"]).split("|"))
     assert "stable_window_presence_count_mismatch" in reasons
     assert "coverage_vintage_count_mismatch" in reasons
 
@@ -337,33 +276,10 @@ def test_reviewed_manual_decision_is_preserved_only_for_reviewed_rows() -> None:
         scope="all-stable",
     ).set_index("raw_series")
 
-    # For an unreviewed row, False is merely the seed default and must
-    # not be interpreted as a human exclusion decision.
-    assert report.loc[
-        "ORDINARY",
-        "manual_include_rt_stable",
-    ] == ""
-
-    assert bool(
-        report.loc[
-            "KEEP",
-            "manual_include_rt_stable",
-        ]
-    ) is True
-
-    assert bool(
-        report.loc[
-            "KEEP",
-            "manual_include_rt_canonical",
-        ]
-    ) is True
-
-    assert bool(
-        report.loc[
-            "DROP",
-            "manual_include_rt_stable",
-        ]
-    ) is False
+    assert report.loc["ORDINARY", "manual_include_rt_stable"] == ""
+    assert bool(report.loc["KEEP", "manual_include_rt_stable"]) is True
+    assert bool(report.loc["KEEP", "manual_include_rt_canonical"]) is True
+    assert bool(report.loc["DROP", "manual_include_rt_stable"]) is False
 
 
 def test_summary_counts_candidate_review_states_and_qc_results() -> None:
@@ -383,11 +299,7 @@ def test_summary_counts_candidate_review_states_and_qc_results() -> None:
         ]
     )
 
-    report = build_eligibility_report(
-        registry,
-        scope="all-stable",
-    )
-
+    report = build_eligibility_report(registry, scope="all-stable")
     summary = build_summary(
         registry,
         report,
@@ -404,20 +316,12 @@ def test_summary_counts_candidate_review_states_and_qc_results() -> None:
 
 
 def test_unknown_boolean_value_is_rejected() -> None:
-    # Construct the malformed value before creating the DataFrame.
-    # This avoids assigning a string into a pandas bool-typed column,
-    # which would itself trigger a FutureWarning unrelated to the
-    # behavior being tested.
     bad_row = _row("A")
     bad_row["candidate_rt_stable"] = "maybe"
-
     registry = pd.DataFrame([bad_row])
 
     with pytest.raises(
         ValueError,
         match="cannot parse candidate_rt_stable",
     ):
-        build_eligibility_report(
-            registry,
-            scope="ordinary",
-        )
+        build_eligibility_report(registry, scope="ordinary")

@@ -1,48 +1,63 @@
-import os
+from __future__ import annotations
+
 import json
+import os
+
 import pandas as pd
 
-from dfm_pipeline.utils.series_transformations import (
-    apply_tcode_transformations, standardize
+from dfm_pipeline.preprocessing.tcode import (
+    apply_tcode_transformations,
+    standardize,
 )
+
 
 def transform_from_csv_and_json(
     csv_path: str,
     tcode_json_path: str,
     save_path: str | None = None,
-    standardize_data: bool = True
+    standardize_data: bool = True,
 ) -> pd.DataFrame:
     """
-    Load raw dataset and tcode map from files, apply transformations, and optionally standardize.
+    Legacy convenience pipeline for one FRED-MD-style CSV.
 
-    Parameters:
-    - csv_path (str): Path to the raw CSV file (with a redundant second row to skip)
-    - tcode_json_path (str): Path to the JSON file containing the tcode mapping
-    - save_path (str, optional): Where to save the resulting DataFrame (as CSV). If None, don't save.
-    - standardize_data (bool): Whether to standardize the transformed data
+    Transformation now delegates to the canonical implementation in
+    ``dfm_pipeline.preprocessing.tcode``.  The historical behaviour of this
+    helper is preserved: it skips the conventional second-row t-code marker and
+    returns only the transformed/standardized DataFrame.
 
-    Returns:
-    - df_final (pd.DataFrame): Transformed (and optionally standardized) DataFrame
+    Notes
+    -----
+    This helper is not the real-time vintage pipeline.  For research-grade
+    pseudo-real-time work, use the vintage-aware ingestion and QC modules so
+    each historical file supplies its own embedded t-code map.
     """
+    df = pd.read_csv(
+        csv_path,
+        skiprows=[1],
+        parse_dates=["sasdate"],
+        index_col="sasdate",
+    )
 
-    # Load raw dataset (skip second row with transformation codes)
-    df = pd.read_csv(csv_path, skiprows=[1], parse_dates=["sasdate"], index_col="sasdate")
+    with open(tcode_json_path, "r", encoding="utf-8") as handle:
+        tcode_map = {
+            key: int(value)
+            for key, value in json.load(handle).items()
+        }
 
-    # Load transformation mapping
-    with open(tcode_json_path, "r") as f:
-        tcode_map = json.load(f)
-
-    # Apply transformations
     df_transformed = apply_tcode_transformations(df, tcode_map)
 
-    # Optionally standardize
-    df_final = standardize(df_transformed) if standardize_data else df_transformed
+    if standardize_data:
+        # Preserve the legacy pandas std convention (ddof=1) used by the old
+        # utility while relying on the canonical standardization routine.
+        df_final, _, _ = standardize(df_transformed, ddof=1)
+    else:
+        df_final = df_transformed
 
-    # Save if path provided
     if save_path:
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        directory = os.path.dirname(save_path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
         df_final.to_csv(save_path)
-        print(f"✅ Transformed dataset saved to {save_path}")
+        print(f"Transformed dataset saved to {save_path}")
 
     return df_final
-

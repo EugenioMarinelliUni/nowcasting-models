@@ -145,7 +145,7 @@ def _problem(
     )
 
 
-def _load_numeric_panel(
+def load_numeric_fred_md_vintage(
     csv_path: Path,
     *,
     tcode_row: int,
@@ -217,6 +217,11 @@ def _load_numeric_panel(
         )
 
     return panel, diagnostics
+
+
+# Backward-compatible private alias. New code should use the public
+# load_numeric_fred_md_vintage() API.
+_load_numeric_panel = load_numeric_fred_md_vintage
 
 
 def audit_single_vintage(
@@ -429,7 +434,10 @@ def audit_single_vintage(
 
     if tcode_row is not None:
         try:
-            panel, panel_diag = _load_numeric_panel(path, tcode_row=tcode_row)
+            panel, panel_diag = load_numeric_fred_md_vintage(
+                path,
+                tcode_row=tcode_row,
+            )
         except Exception as exc:
             _problem(
                 problems,
@@ -442,23 +450,58 @@ def audit_single_vintage(
 
     if panel is not None:
         if panel_diag["date_parse_failures"]:
-            _problem(problems, anomaly_rows, vintage=vintage, filename=path.name,
-                     code="date_parse_failure", detail=str(panel_diag["date_parse_failures"]))
+            _problem(
+                problems,
+                anomaly_rows,
+                vintage=vintage,
+                filename=path.name,
+                code="date_parse_failure",
+                detail=str(panel_diag["date_parse_failures"]),
+            )
         if panel_diag["duplicate_reference_dates"]:
-            _problem(problems, anomaly_rows, vintage=vintage, filename=path.name,
-                     code="duplicate_reference_dates", detail=str(panel_diag["duplicate_reference_dates"]))
+            _problem(
+                problems,
+                anomaly_rows,
+                vintage=vintage,
+                filename=path.name,
+                code="duplicate_reference_dates",
+                detail=str(panel_diag["duplicate_reference_dates"]),
+            )
         if not panel_diag["dates_monotonic_in_input"]:
-            _problem(problems, anomaly_rows, vintage=vintage, filename=path.name,
-                     code="reference_dates_not_monotonic")
+            _problem(
+                problems,
+                anomaly_rows,
+                vintage=vintage,
+                filename=path.name,
+                code="reference_dates_not_monotonic",
+            )
         if panel_diag["non_month_start_dates"]:
-            _problem(problems, anomaly_rows, vintage=vintage, filename=path.name,
-                     code="non_month_start_dates", detail=str(panel_diag["non_month_start_dates"]))
+            _problem(
+                problems,
+                anomaly_rows,
+                vintage=vintage,
+                filename=path.name,
+                code="non_month_start_dates",
+                detail=str(panel_diag["non_month_start_dates"]),
+            )
         if panel_diag["monthly_grid_gaps"]:
-            _problem(problems, anomaly_rows, vintage=vintage, filename=path.name,
-                     code="monthly_grid_gaps", detail=str(panel_diag["monthly_grid_gaps"]))
+            _problem(
+                problems,
+                anomaly_rows,
+                vintage=vintage,
+                filename=path.name,
+                code="monthly_grid_gaps",
+                detail=str(panel_diag["monthly_grid_gaps"]),
+            )
         if panel_diag["bad_numeric_cells"]:
-            _problem(problems, anomaly_rows, vintage=vintage, filename=path.name,
-                     code="non_numeric_data_cells", detail=str(panel_diag["bad_numeric_cells"]))
+            _problem(
+                problems,
+                anomaly_rows,
+                vintage=vintage,
+                filename=path.name,
+                code="non_numeric_data_cells",
+                detail=str(panel_diag["bad_numeric_cells"]),
+            )
 
     total_missing: int | None = None
     pct_missing: float | None = None
@@ -470,7 +513,9 @@ def audit_single_vintage(
     if panel is not None:
         total_missing = int(panel.isna().sum().sum())
         total_cells = int(panel.shape[0] * panel.shape[1])
-        pct_missing = 100.0 * total_missing / total_cells if total_cells > 0 else np.nan
+        pct_missing = (
+            100.0 * total_missing / total_cells if total_cells > 0 else np.nan
+        )
         runs = missing_runs_by_series(panel)
 
         n_series_leading = 0
@@ -493,7 +538,9 @@ def audit_single_vintage(
 
             series_runs = runs[runs["series"] == series_name]
             n_runs = int(len(series_runs))
-            longest_run = int(series_runs["length"].max()) if not series_runs.empty else 0
+            longest_run = (
+                int(series_runs["length"].max()) if not series_runs.empty else 0
+            )
             first_valid = missing["first_valid_date"]
             last_valid = missing["last_valid_date"]
 
@@ -506,16 +553,24 @@ def audit_single_vintage(
                     "n_rows": int(len(s)),
                     "n_valid": int(s.notna().sum()),
                     "n_missing": int(missing["n_missing"]),
-                    "pct_missing": 100.0 * missing["n_missing"] / len(s) if len(s) > 0 else np.nan,
+                    "pct_missing": (
+                        100.0 * missing["n_missing"] / len(s)
+                        if len(s) > 0
+                        else np.nan
+                    ),
                     "n_leading_missing": int(missing["n_leading_missing"]),
                     "n_trailing_missing": int(missing["n_trailing_missing"]),
                     "n_internal_missing": int(missing["n_internal_missing"]),
                     "all_missing": bool(missing["all_missing"]),
                     "first_valid_date": (
-                        pd.Timestamp(first_valid).date().isoformat() if first_valid is not None else None
+                        pd.Timestamp(first_valid).date().isoformat()
+                        if first_valid is not None
+                        else None
                     ),
                     "last_valid_date": (
-                        pd.Timestamp(last_valid).date().isoformat() if last_valid is not None else None
+                        pd.Timestamp(last_valid).date().isoformat()
+                        if last_valid is not None
+                        else None
                     ),
                     "n_missing_runs": n_runs,
                     "longest_missing_run": longest_run,
@@ -571,10 +626,14 @@ def audit_single_vintage(
         "n_duplicate_columns": len(duplicate_columns),
         "n_rows": int(len(panel)) if panel is not None else None,
         "first_reference_date": (
-            panel.index.min().date().isoformat() if panel is not None and len(panel) > 0 else None
+            panel.index.min().date().isoformat()
+            if panel is not None and len(panel) > 0
+            else None
         ),
         "last_reference_date": (
-            panel.index.max().date().isoformat() if panel is not None and len(panel) > 0 else None
+            panel.index.max().date().isoformat()
+            if panel is not None and len(panel) > 0
+            else None
         ),
         "date_parse_failures": panel_diag["date_parse_failures"],
         "duplicate_reference_dates": panel_diag["duplicate_reference_dates"],
@@ -603,7 +662,13 @@ def _build_presence(series_df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
     presence = (
         usable.assign(present=1)
-        .pivot_table(index="series", columns="vintage", values="present", aggfunc="max", fill_value=0)
+        .pivot_table(
+            index="series",
+            columns="vintage",
+            values="present",
+            aggfunc="max",
+            fill_value=0,
+        )
         .astype(int)
         .sort_index()
     )
@@ -623,11 +688,27 @@ def _build_series_changes(presence_df: pd.DataFrame) -> pd.DataFrame:
         added = presence_df.index[(prev == 0) & (cur == 1)]
         removed = presence_df.index[(prev == 1) & (cur == 0)]
         for series_name in added:
-            rows.append({"previous_vintage": previous, "vintage": current, "change": "added", "series": series_name})
+            rows.append(
+                {
+                    "previous_vintage": previous,
+                    "vintage": current,
+                    "change": "added",
+                    "series": series_name,
+                }
+            )
         for series_name in removed:
-            rows.append({"previous_vintage": previous, "vintage": current, "change": "removed", "series": series_name})
+            rows.append(
+                {
+                    "previous_vintage": previous,
+                    "vintage": current,
+                    "change": "removed",
+                    "series": series_name,
+                }
+            )
 
-    return pd.DataFrame(rows, columns=columns).sort_values(["vintage", "change", "series"])
+    return pd.DataFrame(rows, columns=columns).sort_values(
+        ["vintage", "change", "series"]
+    )
 
 
 def _build_tcode_history(series_df: pd.DataFrame) -> pd.DataFrame:
@@ -665,7 +746,6 @@ def _build_tcode_history(series_df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=columns).sort_values("series")
 
 
-
 def _build_collection_summary(
     vintage_df: pd.DataFrame,
     *,
@@ -691,30 +771,36 @@ def _build_collection_summary(
     schema_invalid = int((~vintage_df["schema_valid"]).sum())
 
     if vintage_strings.empty:
-        return pd.DataFrame([{
-            "observed_first_vintage": None,
-            "observed_last_vintage": None,
-            "expected_start_vintage": expected_start,
-            "expected_end_vintage": expected_end,
-            "n_unique_vintages": 0,
-            "expected_n_vintages": 0,
-            "n_missing_vintage_months": 0,
-            "missing_vintage_months": "",
-            "n_unexpected_vintage_months": 0,
-            "unexpected_vintage_months": "",
-            "n_duplicate_vintage_files": int(len(duplicate_rows)),
-            "n_duplicate_vintage_months": int(len(duplicate_months)),
-            "n_unrecognized_vintage_files": n_unrecognized,
-            "schema_valid_files": int(vintage_df["schema_valid"].sum()),
-            "schema_invalid_files": schema_invalid,
-            "collection_valid": False,
-        }])
+        return pd.DataFrame(
+            [
+                {
+                    "observed_first_vintage": None,
+                    "observed_last_vintage": None,
+                    "expected_start_vintage": expected_start,
+                    "expected_end_vintage": expected_end,
+                    "n_unique_vintages": 0,
+                    "expected_n_vintages": 0,
+                    "n_missing_vintage_months": 0,
+                    "missing_vintage_months": "",
+                    "n_unexpected_vintage_months": 0,
+                    "unexpected_vintage_months": "",
+                    "n_duplicate_vintage_files": int(len(duplicate_rows)),
+                    "n_duplicate_vintage_months": int(len(duplicate_months)),
+                    "n_unrecognized_vintage_files": n_unrecognized,
+                    "schema_valid_files": int(vintage_df["schema_valid"].sum()),
+                    "schema_invalid_files": schema_invalid,
+                    "collection_valid": False,
+                }
+            ]
+        )
 
     observed = pd.PeriodIndex(vintage_strings, freq="M").unique().sort_values()
     start = pd.Period(expected_start, freq="M") if expected_start else observed.min()
     end = pd.Period(expected_end, freq="M") if expected_end else observed.max()
     if end < start:
-        raise ValueError(f"expected_end ({end}) is earlier than expected_start ({start}).")
+        raise ValueError(
+            f"expected_end ({end}) is earlier than expected_start ({start})."
+        )
 
     expected = pd.period_range(start, end, freq="M")
     missing = expected.difference(observed)
@@ -728,24 +814,28 @@ def _build_collection_summary(
         and schema_invalid == 0
     )
 
-    return pd.DataFrame([{
-        "observed_first_vintage": str(observed.min()),
-        "observed_last_vintage": str(observed.max()),
-        "expected_start_vintage": str(start),
-        "expected_end_vintage": str(end),
-        "n_unique_vintages": int(len(observed)),
-        "expected_n_vintages": int(len(expected)),
-        "n_missing_vintage_months": int(len(missing)),
-        "missing_vintage_months": "|".join(str(x) for x in missing),
-        "n_unexpected_vintage_months": int(len(unexpected)),
-        "unexpected_vintage_months": "|".join(str(x) for x in unexpected),
-        "n_duplicate_vintage_files": int(len(duplicate_rows)),
-        "n_duplicate_vintage_months": int(len(duplicate_months)),
-        "n_unrecognized_vintage_files": n_unrecognized,
-        "schema_valid_files": int(vintage_df["schema_valid"].sum()),
-        "schema_invalid_files": schema_invalid,
-        "collection_valid": bool(collection_valid),
-    }])
+    return pd.DataFrame(
+        [
+            {
+                "observed_first_vintage": str(observed.min()),
+                "observed_last_vintage": str(observed.max()),
+                "expected_start_vintage": str(start),
+                "expected_end_vintage": str(end),
+                "n_unique_vintages": int(len(observed)),
+                "expected_n_vintages": int(len(expected)),
+                "n_missing_vintage_months": int(len(missing)),
+                "missing_vintage_months": "|".join(str(x) for x in missing),
+                "n_unexpected_vintage_months": int(len(unexpected)),
+                "unexpected_vintage_months": "|".join(str(x) for x in unexpected),
+                "n_duplicate_vintage_files": int(len(duplicate_rows)),
+                "n_duplicate_vintage_months": int(len(duplicate_months)),
+                "n_unrecognized_vintage_files": n_unrecognized,
+                "schema_valid_files": int(vintage_df["schema_valid"].sum()),
+                "schema_invalid_files": schema_invalid,
+                "collection_valid": bool(collection_valid),
+            }
+        ]
+    )
 
 
 def _build_anomaly_summary(anomaly_df: pd.DataFrame) -> pd.DataFrame:
@@ -802,6 +892,7 @@ def _build_vintage_manifest(vintage_df: pd.DataFrame) -> pd.DataFrame:
         .reset_index(drop=True)
     )
 
+
 def audit_vintage_collection(
     raw_dir: str | Path,
     *,
@@ -816,7 +907,9 @@ def audit_vintage_collection(
     if not raw_path.is_dir():
         raise NotADirectoryError(f"Expected a directory: {raw_path}")
 
-    files = sorted(raw_path.rglob("*.csv") if recursive else raw_path.glob("*.csv"))
+    files = sorted(
+        raw_path.rglob("*.csv") if recursive else raw_path.glob("*.csv")
+    )
     if not files:
         raise FileNotFoundError(f"No CSV files found in {raw_path}")
 
@@ -834,16 +927,32 @@ def audit_vintage_collection(
     series_df = pd.DataFrame(series_rows)
     anomaly_df = pd.DataFrame(
         anomaly_rows,
-        columns=["vintage", "filename", "series", "anomaly_type", "start", "end", "length", "detail"],
+        columns=[
+            "vintage",
+            "filename",
+            "series",
+            "anomaly_type",
+            "start",
+            "end",
+            "length",
+            "detail",
+        ],
     )
 
-    duplicate_mask = vintage_df["vintage"].notna() & vintage_df["vintage"].duplicated(keep=False)
+    duplicate_mask = (
+        vintage_df["vintage"].notna()
+        & vintage_df["vintage"].duplicated(keep=False)
+    )
     vintage_df["duplicate_vintage"] = duplicate_mask
 
     if duplicate_mask.any():
         for idx in vintage_df.index[duplicate_mask]:
             current = str(vintage_df.at[idx, "problems"] or "")
-            vintage_df.at[idx, "problems"] = f"{current};duplicate_vintage" if current else "duplicate_vintage"
+            vintage_df.at[idx, "problems"] = (
+                f"{current};duplicate_vintage"
+                if current
+                else "duplicate_vintage"
+            )
             vintage_df.at[idx, "schema_valid"] = False
             anomaly_df.loc[len(anomaly_df)] = {
                 "vintage": vintage_df.at[idx, "vintage"],
@@ -856,13 +965,29 @@ def audit_vintage_collection(
                 "detail": "More than one CSV resolves to this vintage month.",
             }
 
-    vintage_df = vintage_df.sort_values(["vintage", "filename"], na_position="last").reset_index(drop=True)
+    vintage_df = (
+        vintage_df.sort_values(
+            ["vintage", "filename"],
+            na_position="last",
+        )
+        .reset_index(drop=True)
+    )
     if not series_df.empty:
-        series_df = series_df.sort_values(["vintage", "series"], na_position="last").reset_index(drop=True)
+        series_df = (
+            series_df.sort_values(
+                ["vintage", "series"],
+                na_position="last",
+            )
+            .reset_index(drop=True)
+        )
     if not anomaly_df.empty:
-        anomaly_df = anomaly_df.sort_values(
-            ["vintage", "filename", "series", "anomaly_type", "start"], na_position="last"
-        ).reset_index(drop=True)
+        anomaly_df = (
+            anomaly_df.sort_values(
+                ["vintage", "filename", "series", "anomaly_type", "start"],
+                na_position="last",
+            )
+            .reset_index(drop=True)
+        )
 
     presence_df = _build_presence(series_df)
     changes_df = _build_series_changes(presence_df)
@@ -918,13 +1043,27 @@ def write_audit_outputs(
         "vintage_manifest": out_dir / "vintage_manifest.csv",
     }
 
-    outputs["vintage_audit"].to_csv(paths["vintage_audit"], index=False, float_format="%.10g")
-    outputs["series_audit"].to_csv(paths["series_audit"], index=False, float_format="%.10g")
+    outputs["vintage_audit"].to_csv(
+        paths["vintage_audit"],
+        index=False,
+        float_format="%.10g",
+    )
+    outputs["series_audit"].to_csv(
+        paths["series_audit"],
+        index=False,
+        float_format="%.10g",
+    )
     outputs["series_presence"].to_csv(paths["series_presence"], index=True)
     outputs["series_changes"].to_csv(paths["series_changes"], index=False)
-    outputs["series_tcode_history"].to_csv(paths["series_tcode_history"], index=False)
+    outputs["series_tcode_history"].to_csv(
+        paths["series_tcode_history"],
+        index=False,
+    )
     outputs["anomalies"].to_csv(paths["anomalies"], index=False)
-    outputs["collection_summary"].to_csv(paths["collection_summary"], index=False)
+    outputs["collection_summary"].to_csv(
+        paths["collection_summary"],
+        index=False,
+    )
     outputs["anomaly_summary"].to_csv(paths["anomaly_summary"], index=False)
     outputs["vintage_manifest"].to_csv(paths["vintage_manifest"], index=False)
 
@@ -937,6 +1076,7 @@ __all__ = [
     "read_literal_header",
     "read_literal_row",
     "classify_missingness",
+    "load_numeric_fred_md_vintage",
     "audit_single_vintage",
     "audit_vintage_collection",
     "write_audit_outputs",
