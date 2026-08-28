@@ -1,0 +1,2 @@
+n_series,n_ordinary_stable,n_reviewed_stable_keep,stable_window_start,stable_window_end,n_stage1_hard_fail,n_stage2_hard_fail,n_stage2_pass,n_stage2_pass_with_flags,min_stage1_n_valid,min_stage2_transformed_n_valid,min_stage2_transformed_std
+112,109,3,2010-01,2026-06,0,0,112,0,317,315,0.0009426678643
