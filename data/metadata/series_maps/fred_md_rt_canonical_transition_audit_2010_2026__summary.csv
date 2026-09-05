@@ -1,0 +1,2 @@
+start_vintage,end_vintage,n_vintages_expected,n_vintages_checked,n_switch_concepts,n_transition_boundaries,n_vintage_concept_rows,n_vintage_concept_hard_fail,n_concepts_hard_fail
+2010-01,2026-06,198,198,6,6,1188,0,0

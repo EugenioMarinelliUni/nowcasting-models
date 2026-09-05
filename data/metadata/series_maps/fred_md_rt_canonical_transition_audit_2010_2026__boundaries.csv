@@ -1,0 +1,7 @@
+canonical_id,old_source,new_source,old_active_to_vintage,new_active_from_vintage,transition_vintage,old_expected_tcode,new_expected_tcode,relationship_type,equivalence_level
+MONETARY_BASE,AMBSL,BOGMBASE,2019-12,2020-01,2020-01,6,6,official_successor,non_exact
+PPI_FINISHED_CONSUMER_GOODS,PPIFCG,WPSFD49502,2016-02,2016-03,2016-03,6,6,official_successor,non_exact
+PPI_FINISHED_GOODS,PPIFGS,WPSFD49207,2016-02,2016-03,2016-03,6,6,official_successor,non_exact
+PPI_PROCESSED_INTERMEDIATE_GOODS,PPIITM,WPSID61,2016-02,2016-03,2016-03,6,6,official_successor,non_exact
+PPI_UNPROCESSED_INTERMEDIATE_GOODS,PPICRM,WPSID62,2016-02,2016-03,2016-03,6,6,official_successor,non_exact
+TRADE_WEIGHTED_USD_ADVANCED_ECONOMIES,TWEXMMTH,TWEXAFEGSMTHx,2020-03,2020-04,2020-04,5,5,official_successor,non_exact
