@@ -389,20 +389,41 @@ def _select_comparison_mode(
     )
 
 
-def _finite_common(old: pd.Series, new: pd.Series) -> pd.DataFrame:
+def align_finite_common(
+    old: pd.Series,
+    new: pd.Series,
+    *,
+    old_name: str = "old_transformed",
+    new_name: str = "new_transformed",
+) -> pd.DataFrame:
+    """
+    Align two series by index and retain only observations finite in both.
+
+    The default output column names preserve the C3 comparability schema.
+    Custom names allow reuse for reference-series and level comparisons.
+    """
+    if not old_name or not new_name:
+        raise ValueError("Aligned column names must be non-empty")
+    if old_name == new_name:
+        raise ValueError("Aligned column names must be distinct")
+
     aligned = pd.concat(
         [
-            pd.to_numeric(old, errors="coerce").rename("old_transformed"),
-            pd.to_numeric(new, errors="coerce").rename("new_transformed"),
+            pd.to_numeric(old, errors="coerce").rename(old_name),
+            pd.to_numeric(new, errors="coerce").rename(new_name),
         ],
         axis=1,
         join="inner",
     )
     finite = (
-        np.isfinite(aligned["old_transformed"].to_numpy())
-        & np.isfinite(aligned["new_transformed"].to_numpy())
+        np.isfinite(aligned[old_name].to_numpy(dtype=float))
+        & np.isfinite(aligned[new_name].to_numpy(dtype=float))
     )
     return aligned.loc[finite].copy()
+
+
+# Backward-compatible private alias.
+_finite_common = align_finite_common
 
 
 def _pearson(x: pd.Series, y: pd.Series) -> float:
@@ -446,7 +467,29 @@ def _ols_new_on_old(
     return alpha, beta, r2
 
 
-def _metrics_from_aligned(aligned: pd.DataFrame) -> dict[str, Any]:
+def compute_pairwise_diagnostics(
+    aligned: pd.DataFrame,
+    *,
+    old_col: str = "old_transformed",
+    new_col: str = "new_transformed",
+) -> dict[str, Any]:
+    """
+    Compute threshold-free pairwise comparability diagnostics.
+
+    The input must already contain the observations that should enter the
+    comparison. No statistical acceptance threshold is imposed here.
+    """
+    missing = [
+        column
+        for column in (old_col, new_col)
+        if column not in aligned.columns
+    ]
+    if missing:
+        raise ValueError(
+            "Aligned comparison data missing columns: "
+            + ", ".join(missing)
+        )
+
     n = int(len(aligned))
     if n == 0:
         return {
@@ -471,8 +514,8 @@ def _metrics_from_aligned(aligned: pd.DataFrame) -> dict[str, Any]:
             "diagnostic_status": "insufficient_overlap",
         }
 
-    old = aligned["old_transformed"].astype(float)
-    new = aligned["new_transformed"].astype(float)
+    old = aligned[old_col].astype(float)
+    new = aligned[new_col].astype(float)
     diff = new - old
 
     old_std = float(old.std(ddof=0))
@@ -519,6 +562,10 @@ def _metrics_from_aligned(aligned: pd.DataFrame) -> dict[str, Any]:
         "ols_r2": r2,
         "diagnostic_status": status,
     }
+
+
+# Backward-compatible private alias.
+_metrics_from_aligned = compute_pairwise_diagnostics
 
 
 def build_comparability_run_summary(
@@ -675,8 +722,8 @@ def audit_rt_canonical_comparability(
             summary_rows.append(row)
             continue
 
-        aligned = _finite_common(old_transformed, new_transformed)
-        row.update(_metrics_from_aligned(aligned))
+        aligned = align_finite_common(old_transformed, new_transformed)
+        row.update(compute_pairwise_diagnostics(aligned))
         row["diagnostic_flags"] = _join_flags(flags)
         row["mechanical_failure_reasons"] = ""
 
@@ -722,6 +769,8 @@ __all__ = [
     "COMPARABILITY_COLUMNS",
     "ALIGNED_COLUMNS",
     "RUN_SUMMARY_COLUMNS",
+    "align_finite_common",
+    "compute_pairwise_diagnostics",
     "audit_rt_canonical_comparability",
     "build_comparability_run_summary",
 ]

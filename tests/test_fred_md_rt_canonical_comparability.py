@@ -4,10 +4,13 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from dfm_pipeline.ingestion.fred_md_rt_canonical_comparability import (
+    align_finite_common,
     audit_rt_canonical_comparability,
     build_comparability_run_summary,
+    compute_pairwise_diagnostics,
 )
 
 
@@ -327,6 +330,108 @@ def test_aligned_output_contains_only_common_finite_dates(tmp_path: Path) -> Non
         "2009-05-01",
         "2009-06-01",
     ]
+
+
+def test_align_finite_common_filters_nonfinite_and_aligns_dates() -> None:
+    dates = pd.date_range("2000-01-01", periods=5, freq="MS")
+    old = pd.Series(
+        [1.0, 2.0, np.nan, 4.0, np.inf],
+        index=dates,
+    )
+    new = pd.Series(
+        [10.0, np.nan, 30.0, 40.0, 50.0],
+        index=dates,
+    )
+
+    aligned = align_finite_common(old, new)
+
+    assert aligned.index.tolist() == [
+        pd.Timestamp("2000-01-01"),
+        pd.Timestamp("2000-04-01"),
+    ]
+    assert aligned.columns.tolist() == [
+        "old_transformed",
+        "new_transformed",
+    ]
+    assert aligned["old_transformed"].tolist() == [1.0, 4.0]
+    assert aligned["new_transformed"].tolist() == [10.0, 40.0]
+
+
+def test_align_finite_common_supports_custom_column_names() -> None:
+    dates = pd.date_range("2000-01-01", periods=3, freq="MS")
+    old = pd.Series([1.0, 2.0, 3.0], index=dates)
+    new = pd.Series([2.0, 4.0, 6.0], index=dates)
+
+    aligned = align_finite_common(
+        old,
+        new,
+        old_name="old_level",
+        new_name="new_level",
+    )
+
+    assert aligned.columns.tolist() == ["old_level", "new_level"]
+    assert len(aligned) == 3
+
+
+def test_compute_pairwise_diagnostics_perfect_linear_scaling() -> None:
+    dates = pd.date_range("2000-01-01", periods=4, freq="MS")
+    aligned = pd.DataFrame(
+        {
+            "old_transformed": [1.0, 2.0, 3.0, 4.0],
+            "new_transformed": [2.0, 4.0, 6.0, 8.0],
+        },
+        index=dates,
+    )
+
+    out = compute_pairwise_diagnostics(aligned)
+
+    assert out["n_common_valid"] == 4
+    assert out["diagnostic_status"] == "computed"
+    assert np.isclose(out["pearson_corr"], 1.0)
+    assert np.isclose(out["spearman_corr"], 1.0)
+    assert np.isclose(out["std_ratio_new_old"], 2.0)
+    assert np.isclose(out["ols_alpha"], 0.0, atol=1e-12)
+    assert np.isclose(out["ols_beta"], 2.0)
+    assert np.isclose(out["ols_r2"], 1.0)
+    assert np.isclose(out["sign_agreement"], 1.0)
+
+
+def test_compute_pairwise_diagnostics_supports_custom_columns() -> None:
+    dates = pd.date_range("2000-01-01", periods=3, freq="MS")
+    aligned = pd.DataFrame(
+        {
+            "old_level": [10.0, 20.0, 30.0],
+            "new_level": [100.0, 200.0, 300.0],
+        },
+        index=dates,
+    )
+
+    out = compute_pairwise_diagnostics(
+        aligned,
+        old_col="old_level",
+        new_col="new_level",
+    )
+
+    assert out["n_common_valid"] == 3
+    assert out["diagnostic_status"] == "computed"
+    assert np.isclose(out["pearson_corr"], 1.0)
+    assert np.isclose(out["std_ratio_new_old"], 10.0)
+    assert np.isclose(out["ols_beta"], 10.0)
+    assert np.isclose(out["ols_r2"], 1.0)
+
+
+def test_compute_pairwise_diagnostics_rejects_missing_columns() -> None:
+    aligned = pd.DataFrame(
+        {
+            "old_transformed": [1.0, 2.0],
+        }
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Aligned comparison data missing columns",
+    ):
+        compute_pairwise_diagnostics(aligned)
 
 
 def test_run_summary_counts_status_and_mode() -> None:
