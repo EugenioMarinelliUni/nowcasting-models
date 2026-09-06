@@ -1,0 +1,88 @@
+{
+  "artifact_type": "fred_md_rt_canonical_frozen_specification",
+  "counts": {
+    "canonical_concepts": 118,
+    "direct_concepts": 112,
+    "reviewed_switch_concepts": 6,
+    "source_segments": 124,
+    "switch_by_vintage_concepts": 6,
+    "transition_boundaries": 6
+  },
+  "decision_distribution": {
+    "accept_non_exact": 5,
+    "accept_with_break_note": 1
+  },
+  "freeze_date": "2026-09-06",
+  "freeze_gate": {
+    "candidate_structure_validated": true,
+    "candidate_transition_identity_verified": true,
+    "decision_level_gate_passed": true,
+    "excluded_concepts": [],
+    "passed": true,
+    "unresolved_concepts": []
+  },
+  "generator": "dfm_pipeline.ingestion.fred_md_rt_canonical_freeze",
+  "inputs": {
+    "candidate_panel": {
+      "path": "data/metadata/series_maps/fred_md_panel_rt_canonical_2010_2026__candidate.csv",
+      "sha256": "e7c00219cce9a0db479bea81eacf2ea40af6765900aa3a1d8618808a6334fad4"
+    },
+    "candidate_source_map": {
+      "path": "data/metadata/series_maps/fred_md_panel_rt_canonical_2010_2026__candidate__source_map.csv",
+      "sha256": "d39059f4f8b57af9e97d7edbe5028826ff6a59aae7b9f29e311b3136fa2c2754"
+    },
+    "transition_decisions": {
+      "path": "data/metadata/series_maps/fred_md_rt_canonical_transition_review__decisions.csv",
+      "sha256": "1345809691d7bb5fcf9f51bc9f02e67cdbae3cba90228e3df8c6a729cf79a46e"
+    },
+    "transition_evidence": {
+      "path": "data/metadata/series_maps/fred_md_rt_canonical_transition_review__evidence.csv",
+      "sha256": "edba6152879fe04d7f22ab2d92274e8fd05178fed6d3292ab5b958efe80a9972"
+    }
+  },
+  "notes": [
+    "The frozen specification preserves the reviewed candidate source segments without re-estimating or applying statistical acceptance thresholds.",
+    "Transition decisions are attached only to switch_by_vintage concepts; direct concepts inherit the frozen RT_STABLE specification.",
+    "External C4 reference series remain review evidence and are not substituted for FRED-MD historical-vintage model inputs."
+  ],
+  "output": {
+    "frozen_csv": {
+      "column_names": [
+        "panel_position",
+        "canonical_id",
+        "mapping_type",
+        "n_source_segments",
+        "stable_window_start",
+        "stable_window_end",
+        "final_include",
+        "inclusion_reason",
+        "source_order",
+        "source_series",
+        "expected_tcode",
+        "active_from_vintage",
+        "active_to_vintage",
+        "mapping_action",
+        "relationship_type",
+        "equivalence_level",
+        "documented_change_vintage",
+        "source_origin",
+        "source_notes",
+        "transition_review_required",
+        "documentary_review_complete",
+        "review_decision",
+        "decision_rationale",
+        "decision_reviewer",
+        "decision_review_date"
+      ],
+      "columns": 25,
+      "path": "data/metadata/series_maps/fred_md_rt_canonical_frozen_2010_2026.csv",
+      "rows": 124,
+      "sha256": "37147590da419be5e71a127ed90cf29556a4f38b972457a873bf61f7f066b1d7"
+    }
+  },
+  "schema_version": "1.0",
+  "stable_window": {
+    "end": "2026-06",
+    "start": "2010-01"
+  }
+}
